@@ -17,6 +17,14 @@ jobs:
           java-version: '17'
           cache: gradle
 
+      - name: Download gradle wrapper jar
+        run: |
+          mkdir -p gradle/wrapper
+          curl -fL "https://github.com/gradle/gradle/raw/v8.4.0/gradle/wrapper/gradle-wrapper.jar" \
+            -o gradle/wrapper/gradle-wrapper.jar
+          test -s gradle/wrapper/gradle-wrapper.jar || exit 1
+          echo "gradle-wrapper.jar ready"
+
       - name: Download smali tools into assets
         run: |
           mkdir -p app/src/main/assets
