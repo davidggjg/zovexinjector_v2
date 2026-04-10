@@ -32,6 +32,9 @@ android {
     buildFeatures {
         viewBinding true
     }
+    aaptOptions {
+        noCompress 'jar'
+    }
     packagingOptions {
         resources {
             excludes += ['META-INF/**']
