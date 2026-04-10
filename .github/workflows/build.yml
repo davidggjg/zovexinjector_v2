@@ -1,4 +1,4 @@
-name: Build APK
+name: Build ZovexInjector APK
 
 on:
   push:
@@ -8,54 +8,62 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '17'
-          cache: 'gradle'
+          cache: gradle
 
-      - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v3
-        with:
-          gradle-version: '8.6'
-
-      - name: Create fixed debug keystore
+      - name: Download smali tools
         run: |
-          keytool -genkey -v \
-            -keystore app/debug.keystore \
-            -alias androiddebugkey \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 10000 \
-            -storepass android \
-            -keypass android \
-            -dname "CN=Android Debug,O=Android,C=US"
+          mkdir -p app/src/main/assets
+          curl -fL "https://github.com/google/smali/releases/download/3.0.9/baksmali-3.0.9.jar" \
+            -o app/src/main/assets/baksmali.jar
+          curl -fL "https://github.com/google/smali/releases/download/3.0.9/smali-3.0.9.jar" \
+            -o app/src/main/assets/smali.jar
+          ls -lh app/src/main/assets/
 
-      - name: Make gradlew executable
-        run: chmod +x ./gradlew
+      - name: chmod gradlew
+        run: chmod +x gradlew
 
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: gradle-
+      - name: Build release APK
+        run: ./gradlew assembleRelease --no-daemon
 
-      - name: Build Debug APK
-        run: gradle assembleDebug --no-daemon --stacktrace
+      - name: Prepare keystore
+        run: |
+          if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
+            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > signing.keystore
+          else
+            keytool -genkey -v \
+              -keystore signing.keystore \
+              -alias zovex \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass 'Zovex_2024' -keypass 'Zovex_2024' \
+              -dname "CN=ZovexInjector,O=Zovex,C=IL" -noprompt
+          fi
+
+      - name: Sign APK
+        run: |
+          BT="${ANDROID_HOME}/build-tools/$(ls -v ${ANDROID_HOME}/build-tools | tail -1)"
+          IN="app/build/outputs/apk/release/app-release-unsigned.apk"
+          AL="app/build/outputs/apk/release/aligned.apk"
+          OUT="app/build/outputs/apk/release/ZovexInjector.apk"
+          "${BT}/zipalign" -p -f 4 "${IN}" "${AL}"
+          "${BT}/apksigner" sign \
+            --ks signing.keystore --ks-key-alias zovex \
+            --ks-pass pass:'Zovex_2024' --key-pass pass:'Zovex_2024' \
+            --v1-signing-enabled true --v2-signing-enabled true \
+            --out "${OUT}" "${AL}"
+          "${BT}/apksigner" verify --verbose "${OUT}"
+          ls -lh "${OUT}"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: SPenGuard-${{ github.run_number }}
-          path: app/build/outputs/apk/debug/app-debug.apk
-          retention-days: 30
-          if-no-files-found: error
+          name: ZovexInjector
+          path: app/build/outputs/apk/release/ZovexInjector.apk
+          retention-days: 90
+          compression-level: 0
