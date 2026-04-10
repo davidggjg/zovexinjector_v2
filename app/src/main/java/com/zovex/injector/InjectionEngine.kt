@@ -1,0 +1,542 @@
+package com.zovex.injector
+
+import android.content.Context
+import android.util.Base64
+import android.util.Log
+import java.io.*
+import java.security.*
+import java.security.cert.X509Certificate
+import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
+import java.util.zip.ZipOutputStream
+
+class InjectionEngine(private val context: Context) {
+
+    companion object {
+        private const val TAG     = "ZovexInjector"
+        private const val KS_FILE  = "zovex.keystore"
+        private const val KS_ALIAS = "zovex"
+        private const val KS_PASS  = "Zovex_2024"
+    }
+
+    var onStep: ((String) -> Unit)? = null
+    var onLog:  ((String) -> Unit)? = null
+    private fun step(m: String) { Log.d(TAG, m); onStep?.invoke(m) }
+    private fun log(m: String)  { Log.d(TAG, "  $m"); onLog?.invoke("  $m") }
+
+    data class Config(
+        val title: String,
+        val description: String,
+        val okText: String = "אישור",
+        val telegramUrl: String = "",
+        val prefKey: String = "zovex_v1"
+    )
+
+    fun inject(inputApkPath: String, cfg: Config): String {
+        val work = workDir()
+        try {
+            step("📦 פורק APK...")
+            val apkDir = File(work, "apk").also { it.mkdirs() }
+            unzip(inputApkPath, apkDir)
+
+            step("🔍 מאתר Activity ראשי...")
+            val launcher = findLauncher(apkDir)
+            log("Activity: $launcher")
+
+            step("⚙️ מפרק DEX → smali...")
+            val smaliDir = File(work, "smali").also { it.mkdirs() }
+            dex2smali(apkDir, smaliDir)
+
+            step("✏️ מזריק דיאלוג...")
+            val sf = findSmaliFile(smaliDir, launcher)
+                ?: throw IOException("smali לא נמצא: $launcher\nAPK מוגן או obfuscated.")
+            patchOnCreate(sf, cfg)
+            writeListeners(smaliDir, cfg)
+
+            step("🔨 בונה DEX חדש...")
+            val dex = File(work, "classes.dex")
+            smali2dex(smaliDir, dex)
+
+            step("📦 אורז APK ללא META-INF...")
+            val unsigned = File(work, "unsigned.apk")
+            repackNoMetaInf(apkDir, dex, unsigned)
+
+            step("🔏 חותם APK...")
+            val out = outputApk("patched")
+            signFresh(unsigned, out)
+
+            step("✅ הסתיים!")
+            log("${out.name} — ${"%.1f".format(out.length() / 1048576.0)} MB")
+            return out.absolutePath
+        } finally { work.deleteRecursively() }
+    }
+
+    fun deleteDialogs(inputApkPath: String): String {
+        val work = workDir()
+        try {
+            step("📦 פורק APK...")
+            val apkDir = File(work, "apk").also { it.mkdirs() }
+            unzip(inputApkPath, apkDir)
+
+            step("⚙️ מפרק DEX → smali...")
+            val smaliDir = File(work, "smali").also { it.mkdirs() }
+            dex2smali(apkDir, smaliDir)
+
+            step("🗑️ מבטל דיאלוגים...")
+            var n = 0
+            smaliDir.walkTopDown().filter { it.extension == "smali" }.forEach {
+                if (disableDialogInFile(it)) n++
+            }
+            log("בוטלו: $n קבצים")
+
+            step("🔨 בונה DEX חדש...")
+            val dex = File(work, "classes.dex")
+            smali2dex(smaliDir, dex)
+
+            step("📦 אורז APK ללא META-INF...")
+            val unsigned = File(work, "unsigned.apk")
+            repackNoMetaInf(apkDir, dex, unsigned)
+
+            step("🔏 חותם APK...")
+            val out = outputApk("no_dialogs")
+            signFresh(unsigned, out)
+
+            step("✅ הסתיים!")
+            return out.absolutePath
+        } finally { work.deleteRecursively() }
+    }
+
+    // ── Unzip ──────────────────────────────────────────────────
+
+    private fun unzip(apkPath: String, outDir: File) {
+        ZipFile(apkPath).use { zip ->
+            zip.entries().asSequence().forEach { e ->
+                val f = File(outDir, e.name)
+                if (e.isDirectory) { f.mkdirs(); return@forEach }
+                f.parentFile?.mkdirs()
+                zip.getInputStream(e).use { src -> f.outputStream().use { src.copyTo(it) } }
+            }
+        }
+    }
+
+    // ── Find launcher activity ─────────────────────────────────
+
+    private fun findLauncher(apkDir: File): String {
+        val mf = File(apkDir, "AndroidManifest.xml")
+        if (!mf.exists()) throw IOException("AndroidManifest.xml חסר")
+        val bytes = mf.readBytes()
+        return if (bytes[0] == '<'.code.toByte()) parseText(mf.readText()) else parseBinary(bytes)
+    }
+
+    private fun parseText(xml: String): String {
+        val pkg = Regex("""package="([^"]+)"""").find(xml)?.groupValues?.get(1) ?: ""
+        for (m in Regex("""<activity\b.*?</activity>""", RegexOption.DOT_MATCHES_ALL).findAll(xml)) {
+            val b = m.value
+            if ("android.intent.action.MAIN" in b && "android.intent.category.LAUNCHER" in b) {
+                val n = Regex("""android:name="([^"]+)"""").find(b)?.groupValues?.get(1) ?: continue
+                return if (n.startsWith(".")) "$pkg$n" else n
+            }
+        }
+        throw IOException("MAIN+LAUNCHER Activity לא נמצאה")
+    }
+
+    private fun parseBinary(data: ByteArray): String {
+        val strings = mutableListOf<String>()
+        val buf = java.nio.ByteBuffer.wrap(data).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        try {
+            buf.int; buf.int; buf.int; buf.int
+            val count = buf.int
+            buf.int; buf.int; buf.int; buf.int
+            val offsets = IntArray(count) { buf.int }
+            val base = buf.position()
+            for (i in 0 until count) {
+                try {
+                    val p = base + offsets[i]
+                    val len = (data[p].toInt() and 0xFF) or ((data[p+1].toInt() and 0xFF) shl 8)
+                    val sb = StringBuilder()
+                    for (c in 0 until len) {
+                        val cp = p + 2 + c * 2
+                        if (cp + 1 < data.size) {
+                            val ch = ((data[cp].toInt() and 0xFF) or ((data[cp+1].toInt() and 0xFF) shl 8)).toChar()
+                            if (ch != '\u0000') sb.append(ch)
+                        }
+                    }
+                    strings.add(sb.toString())
+                } catch (_: Exception) { strings.add("") }
+            }
+        } catch (_: Exception) {}
+        val mainIdx = strings.indexOfFirst { it == "android.intent.action.MAIN" }
+        if (mainIdx > 0) {
+            for (i in mainIdx downTo maxOf(0, mainIdx - 80)) {
+                val s = strings.getOrNull(i) ?: continue
+                if (s.contains('.') && (s.endsWith("Activity") || "Main" in s)) return s
+            }
+        }
+        return strings.firstOrNull { it.contains('.') && it.endsWith("Activity") }
+            ?: throw IOException("לא ניתן לקרוא AndroidManifest בינארי.")
+    }
+
+    // ── DEX → smali ───────────────────────────────────────────
+
+    private fun dex2smali(apkDir: File, smaliDir: File) {
+        val bak = extractAsset("baksmali.jar")
+        val dexFiles = apkDir.listFiles { f -> f.name.matches(Regex("classes\\d*\\.dex")) }
+            ?.sortedBy { it.name } ?: emptyList()
+        if (dexFiles.isEmpty()) throw IOException("אין קבצי .dex ב-APK")
+        for (dex in dexFiles) {
+            val sub = File(smaliDir, dex.nameWithoutExtension).also { it.mkdirs() }
+            runJar(bak, "disassemble", "-o", sub.absolutePath, dex.absolutePath)
+        }
+        log("DEX files: ${dexFiles.map { it.name }}")
+    }
+
+    // ── Find smali file ────────────────────────────────────────
+
+    private fun findSmaliFile(smaliDir: File, className: String): File? {
+        val rel = className.replace('.', '/') + ".smali"
+        return smaliDir.walkTopDown().firstOrNull { it.absolutePath.endsWith(rel) }
+    }
+
+    // ── Patch onCreate ─────────────────────────────────────────
+
+    private fun patchOnCreate(smaliFile: File, cfg: Config) {
+        val lines = smaliFile.readText().lines().toMutableList()
+        var inCreate = false; var localsIdx = -1; var localsVal = 0; var injectAfter = -1
+
+        for (i in lines.indices) {
+            val s = lines[i].trim()
+            if (".method" in s && "onCreate(Landroid/os/Bundle;)V" in s) {
+                inCreate = true; localsIdx = -1; injectAfter = -1
+            }
+            if (inCreate) {
+                if (s == ".end method") { inCreate = false; continue }
+                if (localsIdx < 0 && s.startsWith(".locals ")) {
+                    localsIdx = i; localsVal = s.substringAfter(".locals ").toIntOrNull() ?: 0
+                }
+                if (injectAfter < 0 && ("->onCreate(Landroid/os/Bundle;)V" in s || "->setContentView(" in s))
+                    injectAfter = i
+            }
+        }
+
+        if (localsIdx < 0) throw IOException(".locals לא נמצא ב-onCreate")
+        if (injectAfter < 0) { injectAfter = localsIdx; log("⚠️ inject after .locals") }
+
+        val newLocals = maxOf(localsVal, 20)
+        lines[localsIdx] = lines[localsIdx].replace(Regex("\\.locals \\d+"), ".locals $newLocals")
+        log(".locals: $localsVal → $newLocals")
+
+        lines.add(injectAfter + 1, buildBlock(cfg))
+        smaliFile.writeText(lines.joinToString("\n"))
+        log("הוזרק: ${smaliFile.name}")
+    }
+
+    private fun buildBlock(cfg: Config): String {
+        val id  = cfg.prefKey.replace(Regex("[^A-Za-z0-9]"), "_")
+        val t   = cfg.title.replace("\"", "\\\"")
+        val d   = cfg.description.replace("\"", "\\\"")
+        val ok  = cfg.okText.replace("\"", "\\\"")
+        val tg  = cfg.telegramUrl.replace("\"", "\\\"")
+        val hasTg = cfg.telegramUrl.isNotBlank()
+
+        return buildString {
+            appendLine(); appendLine("    # ════ ZOVEX DIALOG START ════")
+            appendLine("    const/4 v10, 0x0")
+            appendLine("    const-string v11, \"zovex_pref_$id\"")
+            appendLine("    invoke-virtual {p0, v11, v10}, Landroid/app/Activity;->getSharedPreferences(Ljava/lang/String;I)Landroid/content/SharedPreferences;")
+            appendLine("    move-result-object v11")
+            appendLine("    const-string v12, \"dismissed_$id\"")
+            appendLine("    invoke-interface {v11, v12, v10}, Landroid/content/SharedPreferences;->getBoolean(Ljava/lang/String;Z)Z")
+            appendLine("    move-result v10")
+            appendLine("    if-nez v10, :zovex_end_$id")
+            appendLine("    new-instance v10, Landroidx/appcompat/app/AlertDialog\$Builder;")
+            appendLine("    invoke-direct {v10, p0}, Landroidx/appcompat/app/AlertDialog\$Builder;-><init>(Landroid/content/Context;)V")
+            appendLine("    const-string v12, \"$t\"")
+            appendLine("    invoke-virtual {v10, v12}, Landroidx/appcompat/app/AlertDialog\$Builder;->setTitle(Ljava/lang/CharSequence;)Landroidx/appcompat/app/AlertDialog\$Builder;")
+            appendLine("    move-result-object v10")
+            appendLine("    const-string v12, \"$d\"")
+            appendLine("    invoke-virtual {v10, v12}, Landroidx/appcompat/app/AlertDialog\$Builder;->setMessage(Ljava/lang/CharSequence;)Landroidx/appcompat/app/AlertDialog\$Builder;")
+            appendLine("    move-result-object v10")
+            appendLine("    const-string v12, \"$ok\"")
+            appendLine("    new-instance v13, Lcom/zovex/injected/Ok_$id;")
+            appendLine("    invoke-direct {v13}, Lcom/zovex/injected/Ok_$id;-><init>()V")
+            appendLine("    invoke-virtual {v10, v12, v13}, Landroidx/appcompat/app/AlertDialog\$Builder;->setPositiveButton(Ljava/lang/CharSequence;Landroid/content/DialogInterface\$OnClickListener;)Landroidx/appcompat/app/AlertDialog\$Builder;")
+            appendLine("    move-result-object v10")
+            if (hasTg) {
+                appendLine("    const-string v12, \"\\u05d4\\u05e6\\u05d8\\u05e8\\u05e4\\u05d5 \\u05dc\\u05d8\\u05dc\\u05d2\\u05e8\\u05dd\"")
+                appendLine("    new-instance v13, Lcom/zovex/injected/Tg_$id;")
+                appendLine("    invoke-direct {v13, p0}, Lcom/zovex/injected/Tg_$id;-><init>(Landroid/content/Context;)V")
+                appendLine("    invoke-virtual {v10, v12, v13}, Landroidx/appcompat/app/AlertDialog\$Builder;->setNeutralButton(Ljava/lang/CharSequence;Landroid/content/DialogInterface\$OnClickListener;)Landroidx/appcompat/app/AlertDialog\$Builder;")
+                appendLine("    move-result-object v10")
+            }
+            appendLine("    const-string v12, \"\\u05d0\\u05dc \\u05ea\\u05e6\\u05d9\\u05d2 \\u05e9\\u05d5\\u05d1\"")
+            appendLine("    new-instance v13, Lcom/zovex/injected/Dismiss_$id;")
+            appendLine("    invoke-direct {v13, p0}, Lcom/zovex/injected/Dismiss_$id;-><init>(Landroid/content/Context;)V")
+            appendLine("    invoke-virtual {v10, v12, v13}, Landroidx/appcompat/app/AlertDialog\$Builder;->setNegativeButton(Ljava/lang/CharSequence;Landroid/content/DialogInterface\$OnClickListener;)Landroidx/appcompat/app/AlertDialog\$Builder;")
+            appendLine("    move-result-object v10")
+            appendLine("    const/4 v12, 0x0")
+            appendLine("    invoke-virtual {v10, v12}, Landroidx/appcompat/app/AlertDialog\$Builder;->setCancelable(Z)Landroidx/appcompat/app/AlertDialog\$Builder;")
+            appendLine("    move-result-object v10")
+            appendLine("    invoke-virtual {v10}, Landroidx/appcompat/app/AlertDialog\$Builder;->show()Landroidx/appcompat/app/AlertDialog;")
+            appendLine("    :zovex_end_$id")
+            appendLine("    # ════ ZOVEX DIALOG END ════")
+        }
+    }
+
+    // ── Write listener classes ─────────────────────────────────
+
+    private fun writeListeners(smaliDir: File, cfg: Config) {
+        val id  = cfg.prefKey.replace(Regex("[^A-Za-z0-9]"), "_")
+        val dir = File(smaliDir, "classes/com/zovex/injected").also { it.mkdirs() }
+
+        File(dir, "Ok_$id.smali").writeText("""
+.class public Lcom/zovex/injected/Ok_$id;
+.super Ljava/lang/Object;
+.implements Landroid/content/DialogInterface${'$'}OnClickListener;
+.method public constructor <init>()V
+    .locals 0
+    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+    return-void
+.end method
+.method public onClick(Landroid/content/DialogInterface;I)V
+    .locals 0
+    invoke-interface {p1}, Landroid/content/DialogInterface;->dismiss()V
+    return-void
+.end method""".trimIndent())
+
+        File(dir, "Dismiss_$id.smali").writeText("""
+.class public Lcom/zovex/injected/Dismiss_$id;
+.super Ljava/lang/Object;
+.implements Landroid/content/DialogInterface${'$'}OnClickListener;
+.field private ctx:Landroid/content/Context;
+.method public constructor <init>(Landroid/content/Context;)V
+    .locals 0
+    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+    iput-object p1, p0, Lcom/zovex/injected/Dismiss_$id;->ctx:Landroid/content/Context;
+    return-void
+.end method
+.method public onClick(Landroid/content/DialogInterface;I)V
+    .locals 4
+    iget-object v0, p0, Lcom/zovex/injected/Dismiss_$id;->ctx:Landroid/content/Context;
+    const-string v1, "zovex_pref_$id"
+    const/4 v2, 0x0
+    invoke-virtual {v0, v1, v2}, Landroid/content/Context;->getSharedPreferences(Ljava/lang/String;I)Landroid/content/SharedPreferences;
+    move-result-object v0
+    invoke-interface {v0}, Landroid/content/SharedPreferences;->edit()Landroid/content/SharedPreferences${'$'}Editor;
+    move-result-object v0
+    const-string v1, "dismissed_$id"
+    const/4 v2, 0x1
+    invoke-interface {v0, v1, v2}, Landroid/content/SharedPreferences${'$'}Editor;->putBoolean(Ljava/lang/String;Z)Landroid/content/SharedPreferences${'$'}Editor;
+    move-result-object v0
+    invoke-interface {v0}, Landroid/content/SharedPreferences${'$'}Editor;->apply()V
+    invoke-interface {p1}, Landroid/content/DialogInterface;->dismiss()V
+    return-void
+.end method""".trimIndent())
+
+        if (cfg.telegramUrl.isNotBlank()) {
+            val url = cfg.telegramUrl.replace("\"", "\\\"")
+            File(dir, "Tg_$id.smali").writeText("""
+.class public Lcom/zovex/injected/Tg_$id;
+.super Ljava/lang/Object;
+.implements Landroid/content/DialogInterface${'$'}OnClickListener;
+.field private ctx:Landroid/content/Context;
+.method public constructor <init>(Landroid/content/Context;)V
+    .locals 0
+    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+    iput-object p1, p0, Lcom/zovex/injected/Tg_$id;->ctx:Landroid/content/Context;
+    return-void
+.end method
+.method public onClick(Landroid/content/DialogInterface;I)V
+    .locals 4
+    iget-object v0, p0, Lcom/zovex/injected/Tg_$id;->ctx:Landroid/content/Context;
+    const-string v1, "$url"
+    invoke-static {v1}, Landroid/net/Uri;->parse(Ljava/lang/String;)Landroid/net/Uri;
+    move-result-object v1
+    new-instance v2, Landroid/content/Intent;
+    const-string v3, "android.intent.action.VIEW"
+    invoke-direct {v2, v3, v1}, Landroid/content/Intent;-><init>(Ljava/lang/String;Landroid/net/Uri;)V
+    invoke-virtual {v0, v2}, Landroid/content/Context;->startActivity(Landroid/content/Intent;)V
+    invoke-interface {p1}, Landroid/content/DialogInterface;->dismiss()V
+    return-void
+.end method""".trimIndent())
+        }
+    }
+
+    // ── smali → DEX ───────────────────────────────────────────
+
+    private fun smali2dex(smaliDir: File, outDex: File) {
+        val jar = extractAsset("smali.jar")
+        val dirs = smaliDir.listFiles { f -> f.isDirectory }
+            ?.map { it.absolutePath }?.takeIf { it.isNotEmpty() }
+            ?: listOf(smaliDir.absolutePath)
+        runJar(jar, "assemble", *dirs.toTypedArray(), "-o", outDex.absolutePath)
+        log("DEX: ${outDex.length() / 1024} KB")
+    }
+
+    // ── Repack WITHOUT META-INF ────────────────────────────────
+
+    private fun repackNoMetaInf(apkDir: File, newDex: File, out: File) {
+        ZipOutputStream(out.outputStream().buffered()).use { zos ->
+            zos.setLevel(0)
+            zos.putNextEntry(ZipEntry("classes.dex"))
+            newDex.inputStream().use { it.copyTo(zos) }
+            zos.closeEntry()
+            apkDir.walkTopDown().filter { it.isFile }.forEach { file ->
+                val rel = file.relativeTo(apkDir).path.replace(File.separatorChar, '/')
+                if (rel.matches(Regex("classes\\d*\\.dex"))) return@forEach
+                if (rel.startsWith("META-INF/")) return@forEach
+                zos.putNextEntry(ZipEntry(rel))
+                file.inputStream().use { it.copyTo(zos) }
+                zos.closeEntry()
+            }
+        }
+        log("repacked: ${out.length() / 1024} KB")
+    }
+
+    // ── Sign fresh ─────────────────────────────────────────────
+
+    private fun signFresh(unsigned: File, out: File) {
+        ensureKeystore()
+        val ks = KeyStore.getInstance("PKCS12")
+        File(context.filesDir, KS_FILE).inputStream().use { ks.load(it, KS_PASS.toCharArray()) }
+        val key  = ks.getKey(KS_ALIAS, KS_PASS.toCharArray()) as PrivateKey
+        val cert = ks.getCertificateChain(KS_ALIAS)[0] as X509Certificate
+
+        val mf  = buildManifest(unsigned)
+        val sf  = buildSF(mf)
+        val sig = Signature.getInstance("SHA256withRSA").also { it.initSign(key); it.update(sf) }.sign()
+        val rsa = buildPkcs7(cert, sig)
+
+        ZipOutputStream(out.outputStream().buffered()).use { zos ->
+            zos.setLevel(6)
+            fun put(name: String, data: ByteArray) {
+                zos.putNextEntry(ZipEntry(name)); zos.write(data); zos.closeEntry()
+            }
+            put("META-INF/MANIFEST.MF", mf)
+            put("META-INF/CERT.SF", sf)
+            put("META-INF/CERT.RSA", rsa)
+            ZipFile(unsigned).use { zip ->
+                zip.entries().asSequence().forEach { e ->
+                    zos.putNextEntry(ZipEntry(e.name))
+                    zip.getInputStream(e).use { it.copyTo(zos) }
+                    zos.closeEntry()
+                }
+            }
+        }
+        log("חתום ✅")
+    }
+
+    private fun buildManifest(apk: File): ByteArray {
+        val sb = StringBuilder("Manifest-Version: 1.0\r\nCreated-By: ZovexInjector\r\n\r\n")
+        ZipFile(apk).use { zip ->
+            zip.entries().asSequence()
+                .filter { !it.name.startsWith("META-INF/") }
+                .sortedBy { it.name }
+                .forEach { e ->
+                    val md = MessageDigest.getInstance("SHA-256")
+                    zip.getInputStream(e).use { md.update(it.readBytes()) }
+                    sb.append("Name: ${e.name}\r\nSHA-256-Digest: ${Base64.encodeToString(md.digest(), Base64.NO_WRAP)}\r\n\r\n")
+                }
+        }
+        return sb.toString().toByteArray()
+    }
+
+    private fun buildSF(mf: ByteArray): ByteArray {
+        val d = Base64.encodeToString(MessageDigest.getInstance("SHA-256").digest(mf), Base64.NO_WRAP)
+        return "Signature-Version: 1.0\r\nCreated-By: ZovexInjector\r\nSHA-256-Digest-Manifest: $d\r\n\r\n".toByteArray()
+    }
+
+    private fun buildPkcs7(cert: X509Certificate, sig: ByteArray): ByteArray {
+        val certDer = cert.encoded
+        fun len(n: Int) = when { n < 0x80 -> byteArrayOf(n.toByte()); n < 0x100 -> byteArrayOf(0x81.toByte(), n.toByte()); else -> byteArrayOf(0x82.toByte(), (n ushr 8).toByte(), (n and 0xFF).toByte()) }
+        fun w(t: Int, d: ByteArray) = byteArrayOf(t.toByte()) + len(d.size) + d
+        fun seq(vararg p: ByteArray) = w(0x30, p.reduce { a, b -> a + b })
+        fun set(vararg p: ByteArray) = w(0x31, p.reduce { a, b -> a + b })
+        fun oid(vararg v: Int)       = w(0x06, v.map { it.toByte() }.toByteArray())
+        fun int1(v: Int)             = byteArrayOf(0x02, 0x01, v.toByte())
+        fun octet(b: ByteArray)      = w(0x04, b)
+        fun ctx(t: Int, b: ByteArray)= w(0xA0 or t, b)
+        val nil    = byteArrayOf(0x05, 0x00)
+        val sha256 = oid(0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x01)
+        val rsa    = oid(0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x01,0x01)
+        val d7     = oid(0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x07,0x01)
+        val sd     = oid(0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x07,0x02)
+        val serial = cert.serialNumber.toByteArray().let { byteArrayOf(0x02) + len(it.size) + it }
+        val si = seq(int1(1), seq(cert.issuerX500Principal.encoded, serial), seq(sha256,nil), seq(rsa,nil), octet(sig))
+        val inner = seq(int1(1), set(seq(sha256,nil)), seq(d7), ctx(0,certDer), set(si))
+        return seq(sd, ctx(0, inner))
+    }
+
+    // ── Keystore ───────────────────────────────────────────────
+
+    private fun ensureKeystore() {
+        val f = File(context.filesDir, KS_FILE)
+        if (f.exists()) return
+        log("🔑 יוצר keystore...")
+        val kpg = KeyPairGenerator.getInstance("RSA").also { it.initialize(2048, SecureRandom()) }
+        val kp  = kpg.generateKeyPair()
+        val c   = makeCert(kp)
+        KeyStore.getInstance("PKCS12").also {
+            it.load(null, null)
+            it.setKeyEntry(KS_ALIAS, kp.private, KS_PASS.toCharArray(), arrayOf(c))
+            f.outputStream().use { os -> it.store(os, KS_PASS.toCharArray()) }
+        }
+    }
+
+    private fun makeCert(kp: KeyPair): X509Certificate {
+        val bc  = "org.bouncycastle"
+        val gen = Class.forName("$bc.x509.X509V3CertificateGenerator").newInstance()
+        val cls = gen.javaClass
+        val x500 = Class.forName("$bc.asn1.x500.X500Name")
+            .getConstructor(String::class.java).newInstance("CN=ZovexInjector,O=Zovex,C=IL")
+        val now = java.util.Date(); val exp = java.util.Date(now.time + 3650L * 86400_000L)
+        cls.getMethod("setSerialNumber", java.math.BigInteger::class.java).invoke(gen, java.math.BigInteger(64, SecureRandom()))
+        for (m in listOf("setIssuerDN","setSubjectDN"))
+            cls.getMethod(m, Class.forName("$bc.asn1.x500.X500Name")).invoke(gen, x500)
+        cls.getMethod("setNotBefore",  java.util.Date::class.java).invoke(gen, now)
+        cls.getMethod("setNotAfter",   java.util.Date::class.java).invoke(gen, exp)
+        cls.getMethod("setPublicKey",  PublicKey::class.java).invoke(gen, kp.public)
+        cls.getMethod("setSignatureAlgorithm", String::class.java).invoke(gen, "SHA256WithRSAEncryption")
+        return cls.getMethod("generate", PrivateKey::class.java).invoke(gen, kp.private) as X509Certificate
+    }
+
+    // ── Delete dialog ──────────────────────────────────────────
+
+    private fun disableDialogInFile(f: File): Boolean {
+        val txt = f.readText()
+        if ("AlertDialog" !in txt) return false
+        val lines = txt.lines().toMutableList()
+        var inMethod = false; var localsLine = -1; var done = false
+        for (i in lines.indices) {
+            val s = lines[i].trim()
+            if (s.startsWith(".method")) { inMethod = true; localsLine = -1 }
+            if (inMethod) {
+                if (s == ".end method") { inMethod = false; continue }
+                if (localsLine < 0 && s.startsWith(".locals ")) localsLine = i
+                if ("AlertDialog" in s && "->show()" in s && localsLine >= 0 && !done) {
+                    lines.add(localsLine + 1, "    return-void  # disabled by ZovexInjector")
+                    done = true; log("disabled: ${f.name}"); break
+                }
+            }
+        }
+        if (done) f.writeText(lines.joinToString("\n"))
+        return done
+    }
+
+    // ── Helpers ────────────────────────────────────────────────
+
+    private fun workDir() = File(context.cacheDir, "zovex_${System.currentTimeMillis()}").also { it.mkdirs() }
+    private fun outputApk(p: String) = File(File(context.filesDir, "output").also { it.mkdirs() }, "${p}_${System.currentTimeMillis()}.apk")
+    private fun extractAsset(name: String): File {
+        val f = File(context.cacheDir, name)
+        if (!f.exists() || f.length() == 0L) context.assets.open(name).use { it.copyTo(f.outputStream()) }
+        return f
+    }
+    private fun runJar(jar: File, vararg args: String) {
+        val cl = dalvik.system.DexClassLoader(jar.absolutePath, context.cacheDir.absolutePath, null, ClassLoader.getSystemClassLoader())
+        for (cls in listOf("com.android.tools.smali.baksmali.Main","com.android.tools.smali.smali.Main","org.jf.baksmali.Main","org.jf.smali.Main")) {
+            try { cl.loadClass(cls).getMethod("main", Array<String>::class.java).invoke(null, args as Any); return }
+            catch (_: ClassNotFoundException) {}
+        }
+        throw IOException("main class לא נמצא ב-${jar.name}")
+    }
+}
