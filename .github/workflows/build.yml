@@ -20,9 +20,9 @@ jobs:
       - name: Download smali tools into assets
         run: |
           mkdir -p app/src/main/assets
-          curl -fL "https://github.com/google/smali/releases/download/3.0.3/baksmali-3.0.3.jar" \
+          curl -fL "https://github.com/baksmali/smali/releases/download/3.0.9/baksmali-3.0.9-fat.jar" \
             -o app/src/main/assets/baksmali.jar
-          curl -fL "https://github.com/google/smali/releases/download/3.0.3/smali-3.0.3.jar" \
+          curl -fL "https://github.com/baksmali/smali/releases/download/3.0.9/smali-3.0.9-fat.jar" \
             -o app/src/main/assets/smali.jar
           ls -lh app/src/main/assets/
           test -s app/src/main/assets/baksmali.jar || exit 1
