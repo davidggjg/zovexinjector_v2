@@ -17,7 +17,7 @@ jobs:
           java-version: '17'
           cache: gradle
 
-      - name: Download smali tools
+      - name: Download smali tools into assets
         run: |
           mkdir -p app/src/main/assets
           curl -fL "https://github.com/google/smali/releases/download/3.0.9/baksmali-3.0.9.jar" \
@@ -25,6 +25,9 @@ jobs:
           curl -fL "https://github.com/google/smali/releases/download/3.0.9/smali-3.0.9.jar" \
             -o app/src/main/assets/smali.jar
           ls -lh app/src/main/assets/
+          test -s app/src/main/assets/baksmali.jar || exit 1
+          test -s app/src/main/assets/smali.jar || exit 1
+          echo "smali tools ready"
 
       - name: chmod gradlew
         run: chmod +x gradlew
