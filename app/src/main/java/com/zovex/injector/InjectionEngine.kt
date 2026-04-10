@@ -106,8 +106,6 @@ class InjectionEngine(private val context: Context) {
         } finally { work.deleteRecursively() }
     }
 
-    // ── Unzip ──────────────────────────────────────────────────
-
     private fun unzip(apkPath: String, outDir: File) {
         ZipFile(apkPath).use { zip ->
             zip.entries().asSequence().forEach { e ->
@@ -118,8 +116,6 @@ class InjectionEngine(private val context: Context) {
             }
         }
     }
-
-    // ── Find launcher activity ─────────────────────────────────
 
     private fun findLauncher(apkDir: File): String {
         val mf = File(apkDir, "AndroidManifest.xml")
@@ -176,8 +172,6 @@ class InjectionEngine(private val context: Context) {
             ?: throw IOException("לא ניתן לקרוא AndroidManifest בינארי.")
     }
 
-    // ── DEX → smali ───────────────────────────────────────────
-
     private fun dex2smali(apkDir: File, smaliDir: File) {
         val bak = extractAsset("baksmali.jar")
         val dexFiles = apkDir.listFiles { f -> f.name.matches(Regex("classes\\d*\\.dex")) }
@@ -190,14 +184,10 @@ class InjectionEngine(private val context: Context) {
         log("DEX files: ${dexFiles.map { it.name }}")
     }
 
-    // ── Find smali file ────────────────────────────────────────
-
     private fun findSmaliFile(smaliDir: File, className: String): File? {
         val rel = className.replace('.', '/') + ".smali"
         return smaliDir.walkTopDown().firstOrNull { it.absolutePath.endsWith(rel) }
     }
-
-    // ── Patch onCreate ─────────────────────────────────────────
 
     private fun patchOnCreate(smaliFile: File, cfg: Config) {
         val lines = smaliFile.readText().lines().toMutableList()
@@ -282,8 +272,6 @@ class InjectionEngine(private val context: Context) {
         }
     }
 
-    // ── Write listener classes ─────────────────────────────────
-
     private fun writeListeners(smaliDir: File, cfg: Config) {
         val id  = cfg.prefKey.replace(Regex("[^A-Za-z0-9]"), "_")
         val dir = File(smaliDir, "classes/com/zovex/injected").also { it.mkdirs() }
@@ -361,8 +349,6 @@ class InjectionEngine(private val context: Context) {
         }
     }
 
-    // ── smali → DEX ───────────────────────────────────────────
-
     private fun smali2dex(smaliDir: File, outDex: File) {
         val jar = extractAsset("smali.jar")
         val dirs = smaliDir.listFiles { f -> f.isDirectory }
@@ -371,8 +357,6 @@ class InjectionEngine(private val context: Context) {
         runJar(jar, "assemble", *dirs.toTypedArray(), "-o", outDex.absolutePath)
         log("DEX: ${outDex.length() / 1024} KB")
     }
-
-    // ── Repack WITHOUT META-INF ────────────────────────────────
 
     private fun repackNoMetaInf(apkDir: File, newDex: File, out: File) {
         ZipOutputStream(out.outputStream().buffered()).use { zos ->
@@ -391,8 +375,6 @@ class InjectionEngine(private val context: Context) {
         }
         log("repacked: ${out.length() / 1024} KB")
     }
-
-    // ── Sign fresh ─────────────────────────────────────────────
 
     private fun signFresh(unsigned: File, out: File) {
         ensureKeystore()
@@ -466,8 +448,6 @@ class InjectionEngine(private val context: Context) {
         return seq(sd, ctx(0, inner))
     }
 
-    // ── Keystore ───────────────────────────────────────────────
-
     private fun ensureKeystore() {
         val f = File(context.filesDir, KS_FILE)
         if (f.exists()) return
@@ -499,8 +479,6 @@ class InjectionEngine(private val context: Context) {
         return cls.getMethod("generate", PrivateKey::class.java).invoke(gen, kp.private) as X509Certificate
     }
 
-    // ── Delete dialog ──────────────────────────────────────────
-
     private fun disableDialogInFile(f: File): Boolean {
         val txt = f.readText()
         if ("AlertDialog" !in txt) return false
@@ -522,20 +500,33 @@ class InjectionEngine(private val context: Context) {
         return done
     }
 
-    // ── Helpers ────────────────────────────────────────────────
-
     private fun workDir() = File(context.cacheDir, "zovex_${System.currentTimeMillis()}").also { it.mkdirs() }
     private fun outputApk(p: String) = File(File(context.filesDir, "output").also { it.mkdirs() }, "${p}_${System.currentTimeMillis()}.apk")
+
     private fun extractAsset(name: String): File {
-        val f = File(context.cacheDir, name)
-        if (!f.exists() || f.length() == 0L) context.assets.open(name).use { it.copyTo(f.outputStream()) }
+        // filesDir במקום cacheDir — אנדרואיד 10+ חוסם הרצת קוד מתיקיית cache
+        val dir = File(context.filesDir, "jars").also { it.mkdirs() }
+        val f = File(dir, name)
+        if (!f.exists() || f.length() == 0L)
+            context.assets.open(name).use { it.copyTo(f.outputStream()) }
         return f
     }
+
     private fun runJar(jar: File, vararg args: String) {
-        val cl = dalvik.system.DexClassLoader(jar.absolutePath, context.cacheDir.absolutePath, null, ClassLoader.getSystemClassLoader())
-        for (cls in listOf("com.android.tools.smali.baksmali.Main","com.android.tools.smali.smali.Main","org.jf.baksmali.Main","org.jf.smali.Main")) {
-            try { cl.loadClass(cls).getMethod("main", Array<String>::class.java).invoke(null, args as Any); return }
-            catch (_: ClassNotFoundException) {}
+        val cl = dalvik.system.DexClassLoader(
+            jar.absolutePath, context.cacheDir.absolutePath, null, ClassLoader.getSystemClassLoader()
+        )
+        for (cls in listOf(
+            "com.android.tools.smali.baksmali.Main",
+            "com.android.tools.smali.smali.Main",
+            "org.jf.baksmali.Main",
+            "org.jf.smali.Main"
+        )) {
+            try {
+                cl.loadClass(cls).getMethod("main", Array<String>::class.java)
+                    .invoke(null, args as Any)
+                return
+            } catch (_: ClassNotFoundException) {}
         }
         throw IOException("main class לא נמצא ב-${jar.name}")
     }
