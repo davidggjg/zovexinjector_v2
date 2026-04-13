@@ -501,10 +501,10 @@ class InjectionEngine(private val context: Context) {
     }
 
     private fun workDir() = File(context.cacheDir, "zovex_${System.currentTimeMillis()}").also { it.mkdirs() }
+
     private fun outputApk(p: String) = File(File(context.filesDir, "output").also { it.mkdirs() }, "${p}_${System.currentTimeMillis()}.apk")
 
     private fun extractAsset(name: String): File {
-        // filesDir במקום cacheDir — אנדרואיד 10+ חוסם הרצת קוד מתיקיית cache
         val dir = File(context.filesDir, "jars").also { it.mkdirs() }
         val f = File(dir, name)
         if (!f.exists() || f.length() == 0L)
@@ -513,8 +513,9 @@ class InjectionEngine(private val context: Context) {
     }
 
     private fun runJar(jar: File, vararg args: String) {
+        val optDir = File(context.filesDir, "opt_dex").also { it.mkdirs() }
         val cl = dalvik.system.DexClassLoader(
-            jar.absolutePath, context.cacheDir.absolutePath, null, ClassLoader.getSystemClassLoader()
+            jar.absolutePath, optDir.absolutePath, null, ClassLoader.getSystemClassLoader()
         )
         for (cls in listOf(
             "com.android.tools.smali.baksmali.Main",
@@ -530,4 +531,4 @@ class InjectionEngine(private val context: Context) {
         }
         throw IOException("main class לא נמצא ב-${jar.name}")
     }
-}
+                              }
