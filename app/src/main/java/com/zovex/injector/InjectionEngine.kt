@@ -3,6 +3,16 @@ package com.zovex.injector
 import android.content.Context
 import android.util.Base64
 import android.util.Log
+import com.android.tools.smali.baksmali.Baksmali
+import com.android.tools.smali.baksmali.BaksmaliOptions
+import com.android.tools.smali.dexlib2.DexFileFactory
+import com.android.tools.smali.dexlib2.Opcodes
+import com.android.tools.smali.dexlib2.iface.ClassDef
+import com.android.tools.smali.dexlib2.iface.DexFile
+import com.android.tools.smali.dexlib2.writer.builder.DexBuilder
+import com.android.tools.smali.dexlib2.writer.io.FileDataStore
+import com.android.tools.smali.smali.Smali
+import com.android.tools.smali.smali.SmaliOptions
 import java.io.*
 import java.security.*
 import java.security.cert.X509Certificate
@@ -40,63 +50,49 @@ class InjectionEngine(private val context: Context) {
     fun inject(inputApkPath: String, cfg: Config): String {
         val work = workDir()
         try {
-            // ── 1. Validate input ──────────────────────────
             step("🔎 בודק קובץ APK...")
             validateApk(inputApkPath)
 
-            // ── 2. Unzip ───────────────────────────────────
             step("📦 פורק APK...")
             val apkDir = File(work, "apk").also { it.mkdirs() }
             unzip(inputApkPath, apkDir)
 
-            // ── 3. Scan & fix APK structure ────────────────
             step("🔧 סורק ומתקן מבנה APK...")
             scanAndFixApk(apkDir)
 
-            // ── 4. Find launcher ───────────────────────────
             step("🔍 מאתר Activity ראשי...")
             val launcher = findLauncher(apkDir)
             log("Activity: $launcher")
 
-            // ── 5. Disassemble ─────────────────────────────
             step("⚙️ מפרק DEX → smali...")
             val smaliDir = File(work, "smali").also { it.mkdirs() }
             dex2smali(apkDir, smaliDir)
 
-            // ── 6. Inject ──────────────────────────────────
             step("✏️ מזריק דיאלוג...")
             val sf = findSmaliFile(smaliDir, launcher)
-                ?: throw IOException(
-                    "לא נמצא smali עבור: $launcher\n" +
-                    "APK מוגן (obfuscated). לא ניתן להזריק."
-                )
+                ?: throw IOException("smali לא נמצא: $launcher\nAPK מוגן (obfuscated).")
             patchOnCreate(sf, cfg)
             writeListeners(smaliDir, cfg)
 
-            // ── 7. Assemble ────────────────────────────────
             step("🔨 בונה DEX חדש...")
             val dex = File(work, "classes.dex")
             smali2dex(smaliDir, dex)
 
-            // ── 8. Repack ──────────────────────────────────
             step("📦 אורז APK...")
             val unsigned = File(work, "unsigned.apk")
             repackNoMetaInf(apkDir, dex, unsigned)
 
-            // ── 9. Sign ────────────────────────────────────
             step("🔏 חותם APK...")
             val signed = File(work, "signed.apk")
             signFresh(unsigned, signed)
 
-            // ── 10. Verify × VERIFY_ROUNDS ─────────────────
-            step("✅ מאמת APK ($VERIFY_ROUNDS סיבובים)...")
-            repeat(VERIFY_ROUNDS) { round ->
-                log("אימות סיבוב ${round + 1}/$VERIFY_ROUNDS...")
+            step("✅ מאמת ($VERIFY_ROUNDS פעמים)...")
+            repeat(VERIFY_ROUNDS) { i ->
+                log("אימות ${i + 1}/$VERIFY_ROUNDS...")
                 verifyApk(signed)
             }
             log("כל $VERIFY_ROUNDS אימותים עברו ✅")
 
-            // ── 11. Copy to output ─────────────────────────
             val out = outputApk("patched")
             signed.copyTo(out, overwrite = true)
 
@@ -104,9 +100,7 @@ class InjectionEngine(private val context: Context) {
             log("${out.name} — ${"%.1f".format(out.length() / 1048576.0)} MB")
             return out.absolutePath
 
-        } finally {
-            work.deleteRecursively()
-        }
+        } finally { work.deleteRecursively() }
     }
 
     fun deleteDialogs(inputApkPath: String): String {
@@ -126,7 +120,7 @@ class InjectionEngine(private val context: Context) {
             val smaliDir = File(work, "smali").also { it.mkdirs() }
             dex2smali(apkDir, smaliDir)
 
-            step("🗑️ מבטל דיאלוגים (return-void בטוח)...")
+            step("🗑️ מבטל דיאלוגים...")
             var n = 0
             smaliDir.walkTopDown().filter { it.extension == "smali" }.forEach {
                 if (disableDialogInFile(it)) n++
@@ -145,9 +139,9 @@ class InjectionEngine(private val context: Context) {
             val signed = File(work, "signed.apk")
             signFresh(unsigned, signed)
 
-            step("✅ מאמת APK ($VERIFY_ROUNDS סיבובים)...")
-            repeat(VERIFY_ROUNDS) { round ->
-                log("אימות סיבוב ${round + 1}/$VERIFY_ROUNDS...")
+            step("✅ מאמת ($VERIFY_ROUNDS פעמים)...")
+            repeat(VERIFY_ROUNDS) { i ->
+                log("אימות ${i + 1}/$VERIFY_ROUNDS...")
                 verifyApk(signed)
             }
 
@@ -157,9 +151,7 @@ class InjectionEngine(private val context: Context) {
             step("✅ הסתיים!")
             return out.absolutePath
 
-        } finally {
-            work.deleteRecursively()
-        }
+        } finally { work.deleteRecursively() }
     }
 
     // ══════════════════════════════════════════════════════════
@@ -168,26 +160,17 @@ class InjectionEngine(private val context: Context) {
 
     private fun validateApk(path: String) {
         val f = File(path)
-        if (!f.exists()) throw IOException("הקובץ לא קיים: $path")
-        if (f.length() == 0L) throw IOException("הקובץ ריק")
-        if (f.length() < 1024) throw IOException("הקובץ קטן מדי — לא נראה כ-APK תקין")
-
-        // Check ZIP magic bytes
+        if (!f.exists()) throw IOException("הקובץ לא קיים")
+        if (f.length() < 1024) throw IOException("הקובץ קטן מדי — לא APK תקין")
         val magic = ByteArray(4)
         f.inputStream().use { it.read(magic) }
-        if (magic[0] != 0x50.toByte() || magic[1] != 0x4B.toByte()) {
-            throw IOException(
-                "הקובץ אינו APK תקין (לא ZIP).\n" +
-                "אם זה XAPK — יש לחלץ את ה-APK הפנימי קודם."
-            )
-        }
-
-        // Check it's openable as ZIP
+        if (magic[0] != 0x50.toByte() || magic[1] != 0x4B.toByte())
+            throw IOException("הקובץ אינו APK תקין.\nאם זה XAPK — חלץ את ה-APK הפנימי קודם.")
         try {
             ZipFile(path).use { zip ->
-                val entries = zip.entries().asSequence().toList()
-                if (entries.isEmpty()) throw IOException("APK ריק — אין קבצים בפנים")
-                log("APK תקין: ${entries.size} קבצים")
+                if (zip.entries().asSequence().count() == 0)
+                    throw IOException("APK ריק")
+                log("APK תקין: ${zip.entries().asSequence().count()} קבצים")
             }
         } catch (e: Exception) {
             throw IOException("APK פגום: ${e.message}")
@@ -195,132 +178,51 @@ class InjectionEngine(private val context: Context) {
     }
 
     // ══════════════════════════════════════════════════════════
-    // SCAN & FIX APK STRUCTURE
+    // SCAN & FIX
     // ══════════════════════════════════════════════════════════
 
-    /**
-     * סורק את מבנה ה-APK אחרי פירוק ומתקן בעיות:
-     * - חוסר AndroidManifest.xml
-     * - חוסר classes.dex
-     * - קבצים פגומים
-     */
     private fun scanAndFixApk(apkDir: File) {
-        log("סורק מבנה APK...")
+        // Find AndroidManifest.xml anywhere and move to root
+        val manifest = apkDir.walkTopDown().firstOrNull { it.name == "AndroidManifest.xml" }
+            ?: throw IOException("AndroidManifest.xml לא נמצא ב-APK.\nייתכן שזה XAPK או APK מוצפן.")
 
-        // ── Check & fix AndroidManifest.xml ───────────────
-        val manifest = findFileAnywhere(apkDir, "AndroidManifest.xml")
-        if (manifest == null) {
-            throw IOException(
-                "AndroidManifest.xml לא נמצא ב-APK.\n" +
-                "ייתכן שה-APK פגום, מוצפן, או שזה XAPK."
-            )
-        }
-        // Move to root if not already there
         val rootManifest = File(apkDir, "AndroidManifest.xml")
         if (manifest.absolutePath != rootManifest.absolutePath) {
             log("מעביר AndroidManifest.xml לשורש...")
             manifest.copyTo(rootManifest, overwrite = true)
         }
-        log("✅ AndroidManifest.xml נמצא")
+        log("✅ AndroidManifest.xml")
 
-        // ── Check classes.dex ─────────────────────────────
-        val dexFiles = apkDir.listFiles { f ->
-            f.name.matches(Regex("classes\\d*\\.dex"))
-        } ?: emptyArray()
+        // Check DEX files
+        val dexFiles = apkDir.listFiles { f -> f.name.matches(Regex("classes\\d*\\.dex")) }
+            ?: emptyArray()
+        if (dexFiles.isEmpty()) throw IOException("אין קבצי .dex — APK מוגן או פגום.")
 
-        if (dexFiles.isEmpty()) {
-            throw IOException(
-                "לא נמצאו קבצי .dex ב-APK.\n" +
-                "ייתכן שה-APK מוגן או פגום."
-            )
-        }
-        log("✅ נמצאו ${dexFiles.size} קבצי DEX: ${dexFiles.map { it.name }}")
-
-        // ── Check resources ───────────────────────────────
-        val resDir = File(apkDir, "res")
-        if (!resDir.exists()) {
-            log("⚠️ תיקיית res לא קיימת — APK ללא resources (תקין)")
-        }
-
-        // ── Validate DEX magic bytes ──────────────────────
+        // Validate DEX magic
         for (dex in dexFiles) {
-            val magic = ByteArray(8)
+            val magic = ByteArray(4)
             dex.inputStream().use { it.read(magic) }
-            val magicStr = String(magic.take(4).toByteArray())
-            if (!magicStr.startsWith("dex")) {
+            if (!String(magic).startsWith("dex"))
                 throw IOException("קובץ DEX פגום: ${dex.name}")
-            }
         }
-        log("✅ כל קבצי DEX תקינים")
-
-        // ── Check manifest is readable ────────────────────
-        val mfBytes = rootManifest.readBytes()
-        if (mfBytes.isEmpty()) {
-            throw IOException("AndroidManifest.xml ריק")
-        }
-        log("✅ AndroidManifest.xml נקרא (${mfBytes.size} bytes)")
-    }
-
-    private fun findFileAnywhere(dir: File, name: String): File? {
-        return dir.walkTopDown().firstOrNull { it.name == name }
+        log("✅ ${dexFiles.size} קבצי DEX תקינים")
     }
 
     // ══════════════════════════════════════════════════════════
-    // VERIFY APK
+    // VERIFY
     // ══════════════════════════════════════════════════════════
 
-    /**
-     * מאמת שה-APK המוגמר תקין:
-     * 1. פותח כ-ZIP
-     * 2. בודק שיש classes.dex
-     * 3. בודק שיש AndroidManifest.xml
-     * 4. בודק שיש META-INF עם חתימה
-     * 5. בודק שחתימה RSA קיימת
-     */
     private fun verifyApk(apk: File) {
         ZipFile(apk).use { zip ->
             val entries = zip.entries().asSequence().map { it.name }.toSet()
-
-            // Check DEX
-            if (!entries.any { it.matches(Regex("classes\\d*\\.dex")) }) {
+            if (!entries.any { it.matches(Regex("classes\\d*\\.dex")) })
                 throw IOException("אימות נכשל: חסר classes.dex")
-            }
-
-            // Check Manifest
-            if ("AndroidManifest.xml" !in entries) {
+            if ("AndroidManifest.xml" !in entries)
                 throw IOException("אימות נכשל: חסר AndroidManifest.xml")
-            }
-
-            // Check signature
-            if (!entries.any { it.startsWith("META-INF/") && it.endsWith(".RSA") }) {
+            if (!entries.any { it.startsWith("META-INF/") && it.endsWith(".RSA") })
                 throw IOException("אימות נכשל: חסרה חתימת RSA")
-            }
-
-            if (!entries.any { it.startsWith("META-INF/") && it.endsWith(".SF") }) {
-                throw IOException("אימות נכשל: חסר CERT.SF")
-            }
-
-            if ("META-INF/MANIFEST.MF" !in entries) {
+            if ("META-INF/MANIFEST.MF" !in entries)
                 throw IOException("אימות נכשל: חסר MANIFEST.MF")
-            }
-
-            // Check RSA file not empty
-            val rsaEntry = zip.entries().asSequence()
-                .firstOrNull { it.name.startsWith("META-INF/") && it.name.endsWith(".RSA") }
-            if (rsaEntry == null || rsaEntry.size < 100) {
-                throw IOException("אימות נכשל: חתימת RSA ריקה או פגומה")
-            }
-
-            // Check DEX magic
-            val dexEntry = zip.entries().asSequence()
-                .firstOrNull { it.name == "classes.dex" }
-            if (dexEntry != null) {
-                val magic = ByteArray(4)
-                zip.getInputStream(dexEntry).use { it.read(magic) }
-                if (!String(magic).startsWith("dex")) {
-                    throw IOException("אימות נכשל: DEX פגום")
-                }
-            }
         }
     }
 
@@ -331,18 +233,13 @@ class InjectionEngine(private val context: Context) {
     private fun unzip(apkPath: String, outDir: File) {
         ZipFile(apkPath).use { zip ->
             zip.entries().asSequence().forEach { e ->
-                // Security: prevent zip slip
                 val f = File(outDir, e.name)
-                if (!f.canonicalPath.startsWith(outDir.canonicalPath)) {
-                    log("⚠️ דילוג על קובץ חשוד: ${e.name}")
-                    return@forEach
-                }
+                if (!f.canonicalPath.startsWith(outDir.canonicalPath)) return@forEach
                 if (e.isDirectory) { f.mkdirs(); return@forEach }
                 f.parentFile?.mkdirs()
                 zip.getInputStream(e).use { src -> f.outputStream().use { src.copyTo(it) } }
             }
         }
-        log("נפרק: ${outDir.walkTopDown().filter { it.isFile }.count()} קבצים")
     }
 
     // ══════════════════════════════════════════════════════════
@@ -351,15 +248,13 @@ class InjectionEngine(private val context: Context) {
 
     private fun findLauncher(apkDir: File): String {
         val mf = File(apkDir, "AndroidManifest.xml")
-        if (!mf.exists()) throw IOException("AndroidManifest.xml חסר")
         val bytes = mf.readBytes()
-
         return try {
             if (bytes[0] == '<'.code.toByte()) parseText(mf.readText())
             else parseBinary(bytes)
         } catch (e: Exception) {
-            log("⚠️ פירוס רגיל נכשל: ${e.message} — מנסה fallback...")
-            findLauncherFallback(apkDir)
+            log("⚠️ פירוס נכשל: ${e.message} — מנסה fallback...")
+            findLauncherFromDex(apkDir)
         }
     }
 
@@ -400,7 +295,6 @@ class InjectionEngine(private val context: Context) {
                 } catch (_: Exception) { strings.add("") }
             }
         } catch (_: Exception) {}
-
         val mainIdx = strings.indexOfFirst { it == "android.intent.action.MAIN" }
         if (mainIdx > 0) {
             for (i in mainIdx downTo maxOf(0, mainIdx - 80)) {
@@ -409,75 +303,76 @@ class InjectionEngine(private val context: Context) {
             }
         }
         return strings.firstOrNull { it.contains('.') && it.endsWith("Activity") }
-            ?: throw IOException("לא ניתן לפרסר AndroidManifest בינארי")
+            ?: throw IOException("לא ניתן לפרסר AndroidManifest")
     }
 
     /**
-     * Fallback: חפש Activity ישירות בקבצי smali
-     * אם AndroidManifest לא עובד — נחפש את ה-Activity
-     * שמכיל onCreate + setContentView
+     * Fallback: מחפש Activity ישירות בקבצי DEX באמצעות dexlib2
      */
-    private fun findLauncherFallback(apkDir: File): String {
-        log("מנסה fallback — מחפש Activity בקבצי DEX...")
+    private fun findLauncherFromDex(apkDir: File): String {
+        log("Fallback: סורק DEX עם dexlib2...")
+        val dexFiles = apkDir.listFiles { f -> f.name.matches(Regex("classes\\d*\\.dex")) }
+            ?.sortedBy { it.name } ?: emptyList()
 
-        // Try to find from smali after disassembly
-        val smaliWork = File(apkDir.parentFile, "smali_scan").also { it.mkdirs() }
-        try {
-            val bak = extractAsset("baksmali.jar")
-            val dexFiles = apkDir.listFiles { f -> f.name.matches(Regex("classes\\d*\\.dex")) }
-                ?.sortedBy { it.name } ?: emptyList()
-
-            for (dex in dexFiles) {
-                val sub = File(smaliWork, dex.nameWithoutExtension).also { it.mkdirs() }
-                runJar(bak, "disassemble", "-o", sub.absolutePath, dex.absolutePath)
-            }
-
-            // Find smali files that look like main activities
-            val candidates = smaliWork.walkTopDown()
-                .filter { it.extension == "smali" }
-                .filter { smali ->
-                    val content = smali.readText()
-                    "onCreate(Landroid/os/Bundle;)V" in content &&
-                    "setContentView" in content
+        for (dex in dexFiles) {
+            try {
+                val dexFile = DexFileFactory.loadDexFile(dex, Opcodes.getDefault())
+                for (cls in dexFile.classes) {
+                    val name = cls.type.replace('/', '.').trimStart('L').trimEnd(';')
+                    // חפש class שמכיל onCreate ו-setContentView
+                    val hasOnCreate = cls.methods.any { it.name == "onCreate" }
+                    val superType = cls.superclass ?: ""
+                    if (hasOnCreate && (
+                        superType.contains("Activity") ||
+                        superType.contains("AppCompat")
+                    )) {
+                        log("Fallback מצא: $name")
+                        return name
+                    }
                 }
-                .map { smali ->
-                    smali.absolutePath
-                        .substringAfter("smali_scan/")
-                        .substringAfter("/") // remove classes subfolder
-                        .removeSuffix(".smali")
-                        .replace('/', '.')
-                }
-                .filter { it.contains('.') }
-                .toList()
-
-            if (candidates.isNotEmpty()) {
-                log("Fallback מצא: ${candidates.first()}")
-                return candidates.first()
+            } catch (e: Exception) {
+                log("שגיאה בסריקת ${dex.name}: ${e.message}")
             }
-        } finally {
-            smaliWork.deleteRecursively()
         }
-
-        throw IOException(
-            "לא ניתן למצוא Activity ראשי.\n" +
-            "ה-APK מוגן מדי להזרקה."
-        )
+        throw IOException("לא ניתן למצוא Activity ראשי.\nה-APK מוגן מדי.")
     }
 
     // ══════════════════════════════════════════════════════════
-    // DEX → SMALI
+    // DEX → SMALI  (באמצעות baksmali library ישירות)
     // ══════════════════════════════════════════════════════════
 
     private fun dex2smali(apkDir: File, smaliDir: File) {
-        val bak = extractAsset("baksmali.jar")
         val dexFiles = apkDir.listFiles { f -> f.name.matches(Regex("classes\\d*\\.dex")) }
             ?.sortedBy { it.name } ?: emptyList()
         if (dexFiles.isEmpty()) throw IOException("אין קבצי .dex")
+
         for (dex in dexFiles) {
             val sub = File(smaliDir, dex.nameWithoutExtension).also { it.mkdirs() }
-            runJar(bak, "disassemble", "-o", sub.absolutePath, dex.absolutePath)
+            val options = BaksmaliOptions()
+            val dexFile = DexFileFactory.loadDexFile(dex, Opcodes.getDefault())
+            Baksmali.disassembleDexFile(dexFile, sub, 1, options)
             log("${dex.name} → ${sub.name}/")
         }
+    }
+
+    // ══════════════════════════════════════════════════════════
+    // SMALI → DEX  (באמצעות smali library ישירות)
+    // ══════════════════════════════════════════════════════════
+
+    private fun smali2dex(smaliDir: File, outDex: File) {
+        val options = SmaliOptions()
+        options.outputDexFile = outDex.absolutePath
+
+        val smaliFiles = mutableListOf<String>()
+        smaliDir.walkTopDown().filter { it.extension == "smali" }.forEach {
+            smaliFiles.add(it.absolutePath)
+        }
+
+        if (smaliFiles.isEmpty()) throw IOException("אין קבצי smali לאסמבלי")
+
+        val success = Smali.assemble(options, smaliFiles)
+        if (!success) throw IOException("שגיאה בבניית DEX מ-smali")
+        log("DEX: ${outDex.length() / 1024} KB")
     }
 
     // ══════════════════════════════════════════════════════════
@@ -661,20 +556,7 @@ class InjectionEngine(private val context: Context) {
     }
 
     // ══════════════════════════════════════════════════════════
-    // SMALI → DEX
-    // ══════════════════════════════════════════════════════════
-
-    private fun smali2dex(smaliDir: File, outDex: File) {
-        val jar = extractAsset("smali.jar")
-        val dirs = smaliDir.listFiles { f -> f.isDirectory }
-            ?.map { it.absolutePath }?.takeIf { it.isNotEmpty() }
-            ?: listOf(smaliDir.absolutePath)
-        runJar(jar, "assemble", *dirs.toTypedArray(), "-o", outDex.absolutePath)
-        log("DEX: ${outDex.length() / 1024} KB")
-    }
-
-    // ══════════════════════════════════════════════════════════
-    // REPACK WITHOUT META-INF
+    // REPACK
     // ══════════════════════════════════════════════════════════
 
     private fun repackNoMetaInf(apkDir: File, newDex: File, out: File) {
@@ -847,32 +729,4 @@ class InjectionEngine(private val context: Context) {
     private fun outputApk(p: String) =
         File(File(context.filesDir, "output").also { it.mkdirs() },
             "${p}_${System.currentTimeMillis()}.apk")
-
-    private fun extractAsset(name: String): File {
-        val dir = File(context.filesDir, "jars").also { it.mkdirs() }
-        val f = File(dir, name)
-        if (!f.exists() || f.length() == 0L)
-            context.assets.open(name).use { it.copyTo(f.outputStream()) }
-        return f
-    }
-
-    private fun runJar(jar: File, vararg args: String) {
-        val optDir = File(context.filesDir, "opt_dex").also { it.mkdirs() }
-        val cl = dalvik.system.DexClassLoader(
-            jar.absolutePath, optDir.absolutePath, null, ClassLoader.getSystemClassLoader()
-        )
-        for (cls in listOf(
-            "com.android.tools.smali.baksmali.Main",
-            "com.android.tools.smali.smali.Main",
-            "org.jf.baksmali.Main",
-            "org.jf.smali.Main"
-        )) {
-            try {
-                cl.loadClass(cls).getMethod("main", Array<String>::class.java)
-                    .invoke(null, args as Any)
-                return
-            } catch (_: ClassNotFoundException) {}
-        }
-        throw IOException("main class לא נמצא ב-${jar.name}")
-    }
                               }
