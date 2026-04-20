@@ -46,7 +46,6 @@ dependencies {
     implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
 
-    // dexlib2 — עובד ישירות על DEX, ללא JAR חיצוני
     implementation 'com.android.tools.smali:smali-dexlib2:3.0.9'
     implementation 'com.android.tools.smali:smali:3.0.9'
     implementation 'com.android.tools.smali:baksmali:3.0.9'
