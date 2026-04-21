@@ -47,6 +47,6 @@ dependencies {
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
 
     implementation 'com.android.tools.smali:smali-dexlib2:3.0.9'
-    implementation 'com.android.tools.smali:smali:3.0.9'
-    implementation 'com.android.tools.smali:baksmali:3.0.9'
+    implementation 'com.android.tools.smali:smali-smali:3.0.9'
+    implementation 'com.android.tools.smali:smali-baksmali:3.0.9'
 }
