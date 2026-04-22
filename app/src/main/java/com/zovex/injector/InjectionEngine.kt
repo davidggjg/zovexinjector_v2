@@ -7,10 +7,6 @@ import com.android.tools.smali.baksmali.Baksmali
 import com.android.tools.smali.baksmali.BaksmaliOptions
 import com.android.tools.smali.dexlib2.DexFileFactory
 import com.android.tools.smali.dexlib2.Opcodes
-import com.android.tools.smali.dexlib2.iface.ClassDef
-import com.android.tools.smali.dexlib2.iface.DexFile
-import com.android.tools.smali.dexlib2.writer.builder.DexBuilder
-import com.android.tools.smali.dexlib2.writer.io.FileDataStore
 import com.android.tools.smali.smali.Smali
 import com.android.tools.smali.smali.SmaliOptions
 import java.io.*
@@ -70,7 +66,10 @@ class InjectionEngine(private val context: Context) {
 
             step("✏️ מזריק דיאלוג...")
             val sf = findSmaliFile(smaliDir, launcher)
-                ?: throw IOException("smali לא נמצא: $launcher\nAPK מוגן (obfuscated).")
+                ?: throw IOException(
+                    "smali לא נמצא עבור: $launcher\n" +
+                    "APK מוגן (obfuscated) — לא ניתן להזריק."
+                )
             patchOnCreate(sf, cfg)
             writeListeners(smaliDir, cfg)
 
@@ -170,7 +169,6 @@ class InjectionEngine(private val context: Context) {
             ZipFile(path).use { zip ->
                 if (zip.entries().asSequence().count() == 0)
                     throw IOException("APK ריק")
-                log("APK תקין: ${zip.entries().asSequence().count()} קבצים")
             }
         } catch (e: Exception) {
             throw IOException("APK פגום: ${e.message}")
@@ -182,9 +180,8 @@ class InjectionEngine(private val context: Context) {
     // ══════════════════════════════════════════════════════════
 
     private fun scanAndFixApk(apkDir: File) {
-        // Find AndroidManifest.xml anywhere and move to root
         val manifest = apkDir.walkTopDown().firstOrNull { it.name == "AndroidManifest.xml" }
-            ?: throw IOException("AndroidManifest.xml לא נמצא ב-APK.\nייתכן שזה XAPK או APK מוצפן.")
+            ?: throw IOException("AndroidManifest.xml לא נמצא.\nייתכן שזה XAPK או APK מוצפן.")
 
         val rootManifest = File(apkDir, "AndroidManifest.xml")
         if (manifest.absolutePath != rootManifest.absolutePath) {
@@ -193,12 +190,10 @@ class InjectionEngine(private val context: Context) {
         }
         log("✅ AndroidManifest.xml")
 
-        // Check DEX files
         val dexFiles = apkDir.listFiles { f -> f.name.matches(Regex("classes\\d*\\.dex")) }
             ?: emptyArray()
         if (dexFiles.isEmpty()) throw IOException("אין קבצי .dex — APK מוגן או פגום.")
 
-        // Validate DEX magic
         for (dex in dexFiles) {
             val magic = ByteArray(4)
             dex.inputStream().use { it.read(magic) }
@@ -253,7 +248,7 @@ class InjectionEngine(private val context: Context) {
             if (bytes[0] == '<'.code.toByte()) parseText(mf.readText())
             else parseBinary(bytes)
         } catch (e: Exception) {
-            log("⚠️ פירוס נכשל: ${e.message} — מנסה fallback...")
+            log("⚠️ פירוס נכשל: ${e.message} — fallback לדקס")
             findLauncherFromDex(apkDir)
         }
     }
@@ -306,26 +301,18 @@ class InjectionEngine(private val context: Context) {
             ?: throw IOException("לא ניתן לפרסר AndroidManifest")
     }
 
-    /**
-     * Fallback: מחפש Activity ישירות בקבצי DEX באמצעות dexlib2
-     */
     private fun findLauncherFromDex(apkDir: File): String {
-        log("Fallback: סורק DEX עם dexlib2...")
+        log("סורק DEX עם dexlib2...")
         val dexFiles = apkDir.listFiles { f -> f.name.matches(Regex("classes\\d*\\.dex")) }
             ?.sortedBy { it.name } ?: emptyList()
-
         for (dex in dexFiles) {
             try {
                 val dexFile = DexFileFactory.loadDexFile(dex, Opcodes.getDefault())
                 for (cls in dexFile.classes) {
                     val name = cls.type.replace('/', '.').trimStart('L').trimEnd(';')
-                    // חפש class שמכיל onCreate ו-setContentView
                     val hasOnCreate = cls.methods.any { it.name == "onCreate" }
                     val superType = cls.superclass ?: ""
-                    if (hasOnCreate && (
-                        superType.contains("Activity") ||
-                        superType.contains("AppCompat")
-                    )) {
+                    if (hasOnCreate && (superType.contains("Activity") || superType.contains("AppCompat"))) {
                         log("Fallback מצא: $name")
                         return name
                     }
@@ -334,18 +321,17 @@ class InjectionEngine(private val context: Context) {
                 log("שגיאה בסריקת ${dex.name}: ${e.message}")
             }
         }
-        throw IOException("לא ניתן למצוא Activity ראשי.\nה-APK מוגן מדי.")
+        throw IOException("לא ניתן למצוא Activity ראשי.")
     }
 
     // ══════════════════════════════════════════════════════════
-    // DEX → SMALI  (באמצעות baksmali library ישירות)
+    // DEX → SMALI
     // ══════════════════════════════════════════════════════════
 
     private fun dex2smali(apkDir: File, smaliDir: File) {
         val dexFiles = apkDir.listFiles { f -> f.name.matches(Regex("classes\\d*\\.dex")) }
             ?.sortedBy { it.name } ?: emptyList()
         if (dexFiles.isEmpty()) throw IOException("אין קבצי .dex")
-
         for (dex in dexFiles) {
             val sub = File(smaliDir, dex.nameWithoutExtension).also { it.mkdirs() }
             val options = BaksmaliOptions()
@@ -356,22 +342,19 @@ class InjectionEngine(private val context: Context) {
     }
 
     // ══════════════════════════════════════════════════════════
-    // SMALI → DEX  (באמצעות smali library ישירות)
+    // SMALI → DEX
     // ══════════════════════════════════════════════════════════
 
     private fun smali2dex(smaliDir: File, outDex: File) {
         val options = SmaliOptions()
         options.outputDexFile = outDex.absolutePath
-
-        val smaliFiles = mutableListOf<String>()
-        smaliDir.walkTopDown().filter { it.extension == "smali" }.forEach {
-            smaliFiles.add(it.absolutePath)
-        }
-
-        if (smaliFiles.isEmpty()) throw IOException("אין קבצי smali לאסמבלי")
-
+        val smaliFiles = smaliDir.walkTopDown()
+            .filter { it.extension == "smali" }
+            .map { it.absolutePath }
+            .toList()
+        if (smaliFiles.isEmpty()) throw IOException("אין קבצי smali")
         val success = Smali.assemble(options, smaliFiles)
-        if (!success) throw IOException("שגיאה בבניית DEX מ-smali")
+        if (!success) throw IOException("שגיאה בבניית DEX")
         log("DEX: ${outDex.length() / 1024} KB")
     }
 
@@ -385,23 +368,42 @@ class InjectionEngine(private val context: Context) {
     }
 
     // ══════════════════════════════════════════════════════════
-    // PATCH ONCREATE
+    // PATCH ONCREATE — תומך בכל סוג APK
     // ══════════════════════════════════════════════════════════
 
     private fun patchOnCreate(smaliFile: File, cfg: Config) {
         val lines = smaliFile.readText().lines().toMutableList()
-        var inCreate = false; var localsIdx = -1; var localsVal = 0; var injectAfter = -1
+        var inCreate = false
+        var localsIdx = -1
+        var localsVal = 0
+        var isRegisters = false
+        var injectAfter = -1
 
         for (i in lines.indices) {
             val s = lines[i].trim()
+
             if (".method" in s && "onCreate(Landroid/os/Bundle;)V" in s) {
-                inCreate = true; localsIdx = -1; injectAfter = -1
+                inCreate = true; localsIdx = -1; injectAfter = -1; isRegisters = false
             }
+
             if (inCreate) {
                 if (s == ".end method") { inCreate = false; continue }
+
+                // תמוך ב-.locals (Java style)
                 if (localsIdx < 0 && s.startsWith(".locals ")) {
-                    localsIdx = i; localsVal = s.substringAfter(".locals ").toIntOrNull() ?: 0
+                    localsIdx = i
+                    localsVal = s.substringAfter(".locals ").trim().toIntOrNull() ?: 0
+                    isRegisters = false
                 }
+
+                // תמוך ב-.registers (Kotlin/obfuscated style)
+                if (localsIdx < 0 && s.startsWith(".registers ")) {
+                    localsIdx = i
+                    localsVal = s.substringAfter(".registers ").trim().toIntOrNull() ?: 0
+                    isRegisters = true
+                }
+
+                // נקודת הזרקה אחרי super.onCreate או setContentView
                 if (injectAfter < 0 && (
                     "->onCreate(Landroid/os/Bundle;)V" in s ||
                     "->setContentView(" in s
@@ -409,16 +411,97 @@ class InjectionEngine(private val context: Context) {
             }
         }
 
-        if (localsIdx < 0) throw IOException(".locals לא נמצא ב-onCreate")
-        if (injectAfter < 0) { injectAfter = localsIdx; log("⚠️ inject after .locals") }
+        // אם לא נמצא onCreate — חפש בכל method שמכיל setContentView
+        if (localsIdx < 0) {
+            log("⚠️ onCreate לא נמצא — מחפש setContentView בכל השיטות...")
+            val result = findAnyMethodWithSetContentView(lines)
+            if (result != null) {
+                localsIdx = result.first
+                localsVal = result.second
+                isRegisters = result.third
+                injectAfter = result.fourth
+                log("נמצא method אלטרנטיבי בשורה $localsIdx")
+            } else {
+                throw IOException(
+                    ".locals לא נמצא ב-onCreate\n" +
+                    "APK זה משתמש בארכיטקטורה לא רגילה.\n" +
+                    "נסה APK אחר."
+                )
+            }
+        }
 
-        val newLocals = maxOf(localsVal, 20)
-        lines[localsIdx] = lines[localsIdx].replace(Regex("\\.locals \\d+"), ".locals $newLocals")
-        log(".locals: $localsVal → $newLocals")
+        if (injectAfter < 0) {
+            injectAfter = localsIdx
+            log("⚠️ inject after locals/registers")
+        }
+
+        // עדכן מספר registers/locals
+        if (isRegisters) {
+            // .registers כולל גם params: p0=this, p1=Bundle → 2 params
+            // צריך לפחות 22 registers כדי לקבל v0-v19
+            val newRegs = maxOf(localsVal, 22)
+            lines[localsIdx] = lines[localsIdx]
+                .replace(Regex("\\.registers \\d+"), ".registers $newRegs")
+            log(".registers: $localsVal → $newRegs")
+        } else {
+            val newLocals = maxOf(localsVal, 20)
+            lines[localsIdx] = lines[localsIdx]
+                .replace(Regex("\\.locals \\d+"), ".locals $newLocals")
+            log(".locals: $localsVal → $newLocals")
+        }
 
         lines.add(injectAfter + 1, buildBlock(cfg))
         smaliFile.writeText(lines.joinToString("\n"))
         log("הוזרק: ${smaliFile.name}")
+    }
+
+    // data class קטן לresult
+    private data class MethodInfo(
+        val first: Int,   // localsIdx
+        val second: Int,  // localsVal
+        val third: Boolean, // isRegisters
+        val fourth: Int   // injectAfter
+    )
+
+    private fun findAnyMethodWithSetContentView(lines: List<String>): MethodInfo? {
+        var inMethod = false
+        var localsIdx = -1
+        var localsVal = 0
+        var isRegisters = false
+        var injectAfter = -1
+
+        for (i in lines.indices) {
+            val s = lines[i].trim()
+
+            if (s.startsWith(".method") && ("public" in s || "protected" in s)) {
+                inMethod = true; localsIdx = -1; injectAfter = -1; isRegisters = false
+            }
+
+            if (inMethod) {
+                if (s == ".end method") {
+                    if (injectAfter >= 0 && localsIdx >= 0) {
+                        return MethodInfo(localsIdx, localsVal, isRegisters, injectAfter)
+                    }
+                    inMethod = false; continue
+                }
+
+                if (localsIdx < 0 && s.startsWith(".locals ")) {
+                    localsIdx = i
+                    localsVal = s.substringAfter(".locals ").trim().toIntOrNull() ?: 0
+                    isRegisters = false
+                }
+                if (localsIdx < 0 && s.startsWith(".registers ")) {
+                    localsIdx = i
+                    localsVal = s.substringAfter(".registers ").trim().toIntOrNull() ?: 0
+                    isRegisters = true
+                }
+
+                if (injectAfter < 0 && "->setContentView(" in s) {
+                    injectAfter = i
+                }
+            }
+        }
+        return null
     }
 
     private fun buildBlock(cfg: Config): String {
@@ -708,7 +791,8 @@ class InjectionEngine(private val context: Context) {
             if (s.startsWith(".method")) { inMethod = true; localsLine = -1 }
             if (inMethod) {
                 if (s == ".end method") { inMethod = false; continue }
-                if (localsLine < 0 && s.startsWith(".locals ")) localsLine = i
+                if (localsLine < 0 && (s.startsWith(".locals ") || s.startsWith(".registers ")))
+                    localsLine = i
                 if ("AlertDialog" in s && "->show()" in s && localsLine >= 0 && !done) {
                     lines.add(localsLine + 1, "    return-void  # disabled by ZovexInjector")
                     done = true; log("disabled: ${f.name}"); break
