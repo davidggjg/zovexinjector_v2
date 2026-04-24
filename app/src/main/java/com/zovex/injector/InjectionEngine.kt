@@ -39,10 +39,6 @@ class InjectionEngine(private val context: Context) {
         val prefKey: String = "zovex_v1"
     )
 
-    // ══════════════════════════════════════════════════════════
-    // PUBLIC API
-    // ══════════════════════════════════════════════════════════
-
     fun inject(inputApkPath: String, cfg: Config): String {
         val work = workDir()
         try {
@@ -66,10 +62,7 @@ class InjectionEngine(private val context: Context) {
 
             step("✏️ מזריק דיאלוג...")
             val sf = findSmaliFile(smaliDir, launcher)
-                ?: throw IOException(
-                    "smali לא נמצא עבור: $launcher\n" +
-                    "APK מוגן (obfuscated) — לא ניתן להזריק."
-                )
+                ?: throw IOException("smali לא נמצא: $launcher\nAPK מוגן.")
             patchOnCreate(sf, cfg)
             writeListeners(smaliDir, cfg)
 
@@ -98,7 +91,6 @@ class InjectionEngine(private val context: Context) {
             step("✅ הסתיים!")
             log("${out.name} — ${"%.1f".format(out.length() / 1048576.0)} MB")
             return out.absolutePath
-
         } finally { work.deleteRecursively() }
     }
 
@@ -149,81 +141,58 @@ class InjectionEngine(private val context: Context) {
 
             step("✅ הסתיים!")
             return out.absolutePath
-
         } finally { work.deleteRecursively() }
     }
 
-    // ══════════════════════════════════════════════════════════
-    // VALIDATE
-    // ══════════════════════════════════════════════════════════
+    // ── Validate ───────────────────────────────────────────────
 
     private fun validateApk(path: String) {
         val f = File(path)
         if (!f.exists()) throw IOException("הקובץ לא קיים")
-        if (f.length() < 1024) throw IOException("הקובץ קטן מדי — לא APK תקין")
+        if (f.length() < 1024) throw IOException("הקובץ קטן מדי")
         val magic = ByteArray(4)
         f.inputStream().use { it.read(magic) }
         if (magic[0] != 0x50.toByte() || magic[1] != 0x4B.toByte())
             throw IOException("הקובץ אינו APK תקין.\nאם זה XAPK — חלץ את ה-APK הפנימי קודם.")
         try {
             ZipFile(path).use { zip ->
-                if (zip.entries().asSequence().count() == 0)
-                    throw IOException("APK ריק")
+                if (zip.entries().asSequence().count() == 0) throw IOException("APK ריק")
+                log("APK תקין: ${zip.entries().asSequence().count()} קבצים, ${fmtSize(f.length())}")
             }
-        } catch (e: Exception) {
-            throw IOException("APK פגום: ${e.message}")
-        }
+        } catch (e: Exception) { throw IOException("APK פגום: ${e.message}") }
     }
 
-    // ══════════════════════════════════════════════════════════
-    // SCAN & FIX
-    // ══════════════════════════════════════════════════════════
+    // ── Scan & Fix ─────────────────────────────────────────────
 
     private fun scanAndFixApk(apkDir: File) {
         val manifest = apkDir.walkTopDown().firstOrNull { it.name == "AndroidManifest.xml" }
             ?: throw IOException("AndroidManifest.xml לא נמצא.\nייתכן שזה XAPK או APK מוצפן.")
-
-        val rootManifest = File(apkDir, "AndroidManifest.xml")
-        if (manifest.absolutePath != rootManifest.absolutePath) {
-            log("מעביר AndroidManifest.xml לשורש...")
-            manifest.copyTo(rootManifest, overwrite = true)
+        val root = File(apkDir, "AndroidManifest.xml")
+        if (manifest.absolutePath != root.absolutePath) {
+            manifest.copyTo(root, overwrite = true)
+            log("הועבר AndroidManifest.xml לשורש")
         }
-        log("✅ AndroidManifest.xml")
-
-        val dexFiles = apkDir.listFiles { f -> f.name.matches(Regex("classes\\d*\\.dex")) }
-            ?: emptyArray()
+        val dexFiles = apkDir.listFiles { f -> f.name.matches(Regex("classes\\d*\\.dex")) } ?: emptyArray()
         if (dexFiles.isEmpty()) throw IOException("אין קבצי .dex — APK מוגן או פגום.")
-
         for (dex in dexFiles) {
-            val magic = ByteArray(4)
-            dex.inputStream().use { it.read(magic) }
-            if (!String(magic).startsWith("dex"))
-                throw IOException("קובץ DEX פגום: ${dex.name}")
+            val magic = ByteArray(4); dex.inputStream().use { it.read(magic) }
+            if (!String(magic).startsWith("dex")) throw IOException("DEX פגום: ${dex.name}")
         }
         log("✅ ${dexFiles.size} קבצי DEX תקינים")
     }
 
-    // ══════════════════════════════════════════════════════════
-    // VERIFY
-    // ══════════════════════════════════════════════════════════
+    // ── Verify ─────────────────────────────────────────────────
 
     private fun verifyApk(apk: File) {
         ZipFile(apk).use { zip ->
-            val entries = zip.entries().asSequence().map { it.name }.toSet()
-            if (!entries.any { it.matches(Regex("classes\\d*\\.dex")) })
-                throw IOException("אימות נכשל: חסר classes.dex")
-            if ("AndroidManifest.xml" !in entries)
-                throw IOException("אימות נכשל: חסר AndroidManifest.xml")
-            if (!entries.any { it.startsWith("META-INF/") && it.endsWith(".RSA") })
-                throw IOException("אימות נכשל: חסרה חתימת RSA")
-            if ("META-INF/MANIFEST.MF" !in entries)
-                throw IOException("אימות נכשל: חסר MANIFEST.MF")
+            val e = zip.entries().asSequence().map { it.name }.toSet()
+            if (!e.any { it.matches(Regex("classes\\d*\\.dex")) }) throw IOException("חסר DEX")
+            if ("AndroidManifest.xml" !in e) throw IOException("חסר Manifest")
+            if (!e.any { it.startsWith("META-INF/") && it.endsWith(".RSA") }) throw IOException("חסרה חתימה")
         }
     }
 
-    // ══════════════════════════════════════════════════════════
-    // UNZIP
-    // ══════════════════════════════════════════════════════════
+    // ── Unzip ──────────────────────────────────────────────────
 
     private fun unzip(apkPath: String, outDir: File) {
         ZipFile(apkPath).use { zip ->
@@ -237,18 +206,15 @@ class InjectionEngine(private val context: Context) {
         }
     }
 
-    // ══════════════════════════════════════════════════════════
-    // FIND LAUNCHER ACTIVITY
-    // ══════════════════════════════════════════════════════════
+    // ── Find Launcher ──────────────────────────────────────────
 
     private fun findLauncher(apkDir: File): String {
         val mf = File(apkDir, "AndroidManifest.xml")
         val bytes = mf.readBytes()
         return try {
-            if (bytes[0] == '<'.code.toByte()) parseText(mf.readText())
-            else parseBinary(bytes)
+            if (bytes[0] == '<'.code.toByte()) parseText(mf.readText()) else parseBinary(bytes)
         } catch (e: Exception) {
-            log("⚠️ פירוס נכשל: ${e.message} — fallback לדקס")
+            log("⚠️ manifest פירוס נכשל — fallback לדקס")
             findLauncherFromDex(apkDir)
         }
     }
@@ -262,7 +228,7 @@ class InjectionEngine(private val context: Context) {
                 return if (n.startsWith(".")) "$pkg$n" else n
             }
         }
-        throw IOException("MAIN+LAUNCHER Activity לא נמצאה")
+        throw IOException("MAIN+LAUNCHER לא נמצא")
     }
 
     private fun parseBinary(data: ByteArray): String {
@@ -298,7 +264,7 @@ class InjectionEngine(private val context: Context) {
             }
         }
         return strings.firstOrNull { it.contains('.') && it.endsWith("Activity") }
-            ?: throw IOException("לא ניתן לפרסר AndroidManifest")
+            ?: throw IOException("לא ניתן לפרסר Manifest")
     }
 
     private fun findLauncherFromDex(apkDir: File): String {
@@ -313,63 +279,58 @@ class InjectionEngine(private val context: Context) {
                     val hasOnCreate = cls.methods.any { it.name == "onCreate" }
                     val superType = cls.superclass ?: ""
                     if (hasOnCreate && (superType.contains("Activity") || superType.contains("AppCompat"))) {
-                        log("Fallback מצא: $name")
+                        log("מצא: $name")
                         return name
                     }
                 }
-            } catch (e: Exception) {
-                log("שגיאה בסריקת ${dex.name}: ${e.message}")
-            }
+            } catch (e: Exception) { log("שגיאה: ${e.message}") }
         }
-        throw IOException("לא ניתן למצוא Activity ראשי.")
+        throw IOException("לא ניתן למצוא Activity.")
     }
 
-    // ══════════════════════════════════════════════════════════
-    // DEX → SMALI
-    // ══════════════════════════════════════════════════════════
+    // ── DEX → smali  (בזיכרון נמוך — thread אחד) ───────────────
 
     private fun dex2smali(apkDir: File, smaliDir: File) {
         val dexFiles = apkDir.listFiles { f -> f.name.matches(Regex("classes\\d*\\.dex")) }
             ?.sortedBy { it.name } ?: emptyList()
-        if (dexFiles.isEmpty()) throw IOException("אין קבצי .dex")
+        if (dexFiles.isEmpty()) throw IOException("אין DEX")
+
         for (dex in dexFiles) {
             val sub = File(smaliDir, dex.nameWithoutExtension).also { it.mkdirs() }
             val options = BaksmaliOptions()
+            // thread אחד בלבד — מונע OOM על APK גדולים
             val dexFile = DexFileFactory.loadDexFile(dex, Opcodes.getDefault())
             Baksmali.disassembleDexFile(dexFile, sub, 1, options)
             log("${dex.name} → ${sub.name}/")
+            // מנקה זיכרון בין כל DEX
+            System.gc()
         }
     }
 
-    // ══════════════════════════════════════════════════════════
-    // SMALI → DEX
-    // ══════════════════════════════════════════════════════════
+    // ── smali → DEX ────────────────────────────────────────────
 
     private fun smali2dex(smaliDir: File, outDex: File) {
         val options = SmaliOptions()
         options.outputDexFile = outDex.absolutePath
-        val smaliFiles = smaliDir.walkTopDown()
-            .filter { it.extension == "smali" }
-            .map { it.absolutePath }
-            .toList()
-        if (smaliFiles.isEmpty()) throw IOException("אין קבצי smali")
+        // אסוף קבצים לרשימה במקום stream — חוסך זיכרון
+        val smaliFiles = ArrayList<String>()
+        smaliDir.walkTopDown().forEach { f ->
+            if (f.extension == "smali") smaliFiles.add(f.absolutePath)
+        }
+        if (smaliFiles.isEmpty()) throw IOException("אין smali")
         val success = Smali.assemble(options, smaliFiles)
         if (!success) throw IOException("שגיאה בבניית DEX")
         log("DEX: ${outDex.length() / 1024} KB")
     }
 
-    // ══════════════════════════════════════════════════════════
-    // FIND SMALI FILE
-    // ══════════════════════════════════════════════════════════
+    // ── Find smali file ────────────────────────────────────────
 
     private fun findSmaliFile(smaliDir: File, className: String): File? {
         val rel = className.replace('.', '/') + ".smali"
         return smaliDir.walkTopDown().firstOrNull { it.absolutePath.endsWith(rel) }
     }
 
-    // ══════════════════════════════════════════════════════════
-    // PATCH ONCREATE — תומך בכל סוג APK
-    // ══════════════════════════════════════════════════════════
+    // ── Patch onCreate — תומך בכל סוג APK ────────────────────
 
     private fun patchOnCreate(smaliFile: File, cfg: Config) {
         val lines = smaliFile.readText().lines().toMutableList()
@@ -385,25 +346,18 @@ class InjectionEngine(private val context: Context) {
             if (".method" in s && "onCreate(Landroid/os/Bundle;)V" in s) {
                 inCreate = true; localsIdx = -1; injectAfter = -1; isRegisters = false
             }
-
             if (inCreate) {
                 if (s == ".end method") { inCreate = false; continue }
-
-                // תמוך ב-.locals (Java style)
                 if (localsIdx < 0 && s.startsWith(".locals ")) {
                     localsIdx = i
                     localsVal = s.substringAfter(".locals ").trim().toIntOrNull() ?: 0
                     isRegisters = false
                 }
-
-                // תמוך ב-.registers (Kotlin/obfuscated style)
                 if (localsIdx < 0 && s.startsWith(".registers ")) {
                     localsIdx = i
                     localsVal = s.substringAfter(".registers ").trim().toIntOrNull() ?: 0
                     isRegisters = true
                 }
-
-                // נקודת הזרקה אחרי super.onCreate או setContentView
                 if (injectAfter < 0 && (
                     "->onCreate(Landroid/os/Bundle;)V" in s ||
                     "->setContentView(" in s
@@ -411,42 +365,27 @@ class InjectionEngine(private val context: Context) {
             }
         }
 
-        // אם לא נמצא onCreate — חפש בכל method שמכיל setContentView
+        // fallback — חפש כל method עם setContentView
         if (localsIdx < 0) {
-            log("⚠️ onCreate לא נמצא — מחפש setContentView בכל השיטות...")
-            val result = findAnyMethodWithSetContentView(lines)
-            if (result != null) {
-                localsIdx = result.first
-                localsVal = result.second
-                isRegisters = result.third
-                injectAfter = result.fourth
-                log("נמצא method אלטרנטיבי בשורה $localsIdx")
+            log("⚠️ onCreate לא נמצא — מחפש setContentView...")
+            val r = findMethodWithSetContentView(lines)
+            if (r != null) {
+                localsIdx = r[0]; localsVal = r[1]; isRegisters = r[2] == 1; injectAfter = r[3]
             } else {
-                throw IOException(
-                    ".locals לא נמצא ב-onCreate\n" +
-                    "APK זה משתמש בארכיטקטורה לא רגילה.\n" +
-                    "נסה APK אחר."
-                )
+                throw IOException(".locals לא נמצא ב-onCreate\nAPK זה לא ניתן להזרקה.")
             }
         }
 
-        if (injectAfter < 0) {
-            injectAfter = localsIdx
-            log("⚠️ inject after locals/registers")
-        }
+        if (injectAfter < 0) injectAfter = localsIdx
 
-        // עדכן מספר registers/locals
         if (isRegisters) {
-            // .registers כולל גם params: p0=this, p1=Bundle → 2 params
-            // צריך לפחות 22 registers כדי לקבל v0-v19
+            // .registers = locals + params (2) → צריך לפחות 22
             val newRegs = maxOf(localsVal, 22)
-            lines[localsIdx] = lines[localsIdx]
-                .replace(Regex("\\.registers \\d+"), ".registers $newRegs")
+            lines[localsIdx] = lines[localsIdx].replace(Regex("\\.registers \\d+"), ".registers $newRegs")
             log(".registers: $localsVal → $newRegs")
         } else {
             val newLocals = maxOf(localsVal, 20)
-            lines[localsIdx] = lines[localsIdx]
-                .replace(Regex("\\.locals \\d+"), ".locals $newLocals")
+            lines[localsIdx] = lines[localsIdx].replace(Regex("\\.locals \\d+"), ".locals $newLocals")
             log(".locals: $localsVal → $newLocals")
         }
 
@@ -455,66 +394,42 @@ class InjectionEngine(private val context: Context) {
         log("הוזרק: ${smaliFile.name}")
     }
 
-    // data class קטן לresult
-    private data class MethodInfo(
-        val first: Int,   // localsIdx
-        val second: Int,  // localsVal
-        val third: Boolean, // isRegisters
-        val fourth: Int   // injectAfter
-    )
-
-    private fun findAnyMethodWithSetContentView(lines: List<String>): MethodInfo? {
+    private fun findMethodWithSetContentView(lines: List<String>): IntArray? {
         var inMethod = false
-        var localsIdx = -1
-        var localsVal = 0
-        var isRegisters = false
-        var injectAfter = -1
-
+        var localsIdx = -1; var localsVal = 0; var isRegs = 0; var injectAfter = -1
         for (i in lines.indices) {
             val s = lines[i].trim()
-
             if (s.startsWith(".method") && ("public" in s || "protected" in s)) {
-                inMethod = true; localsIdx = -1; injectAfter = -1; isRegisters = false
+                inMethod = true; localsIdx = -1; injectAfter = -1
             }
-
             if (inMethod) {
                 if (s == ".end method") {
-                    if (injectAfter >= 0 && localsIdx >= 0) {
-                        return MethodInfo(localsIdx, localsVal, isRegisters, injectAfter)
-                    }
+                    if (injectAfter >= 0 && localsIdx >= 0)
+                        return intArrayOf(localsIdx, localsVal, isRegs, injectAfter)
                     inMethod = false; continue
                 }
-
                 if (localsIdx < 0 && s.startsWith(".locals ")) {
-                    localsIdx = i
-                    localsVal = s.substringAfter(".locals ").trim().toIntOrNull() ?: 0
-                    isRegisters = false
+                    localsIdx = i; localsVal = s.substringAfter(".locals ").trim().toIntOrNull() ?: 0; isRegs = 0
                 }
                 if (localsIdx < 0 && s.startsWith(".registers ")) {
-                    localsIdx = i
-                    localsVal = s.substringAfter(".registers ").trim().toIntOrNull() ?: 0
-                    isRegisters = true
+                    localsIdx = i; localsVal = s.substringAfter(".registers ").trim().toIntOrNull() ?: 0; isRegs = 1
                 }
-
-                if (injectAfter < 0 && "->setContentView(" in s) {
-                    injectAfter = i
-                }
+                if (injectAfter < 0 && "->setContentView(" in s) injectAfter = i
             }
         }
         return null
     }
 
     private fun buildBlock(cfg: Config): String {
-        val id    = cfg.prefKey.replace(Regex("[^A-Za-z0-9]"), "_")
-        val t     = cfg.title.replace("\"", "\\\"")
-        val d     = cfg.description.replace("\"", "\\\"")
-        val ok    = cfg.okText.replace("\"", "\\\"")
-        val tg    = cfg.telegramUrl.replace("\"", "\\\"")
+        val id = cfg.prefKey.replace(Regex("[^A-Za-z0-9]"), "_")
+        val t  = cfg.title.replace("\"", "\\\"")
+        val d  = cfg.description.replace("\"", "\\\"")
+        val ok = cfg.okText.replace("\"", "\\\"")
+        val tg = cfg.telegramUrl.replace("\"", "\\\"")
         val hasTg = cfg.telegramUrl.isNotBlank()
 
         return buildString {
-            appendLine()
-            appendLine("    # ════ ZOVEX DIALOG START ════")
+            appendLine(); appendLine("    # ════ ZOVEX DIALOG START ════")
             appendLine("    const/4 v10, 0x0")
             appendLine("    const-string v11, \"zovex_pref_$id\"")
             appendLine("    invoke-virtual {p0, v11, v10}, Landroid/app/Activity;->getSharedPreferences(Ljava/lang/String;I)Landroid/content/SharedPreferences;")
@@ -557,9 +472,7 @@ class InjectionEngine(private val context: Context) {
         }
     }
 
-    // ══════════════════════════════════════════════════════════
-    // WRITE LISTENER CLASSES
-    // ══════════════════════════════════════════════════════════
+    // ── Write Listeners ────────────────────────────────────────
 
     private fun writeListeners(smaliDir: File, cfg: Config) {
         val id  = cfg.prefKey.replace(Regex("[^A-Za-z0-9]"), "_")
@@ -638,9 +551,7 @@ class InjectionEngine(private val context: Context) {
         }
     }
 
-    // ══════════════════════════════════════════════════════════
-    // REPACK
-    // ══════════════════════════════════════════════════════════
+    // ── Repack ─────────────────────────────────────────────────
 
     private fun repackNoMetaInf(apkDir: File, newDex: File, out: File) {
         ZipOutputStream(out.outputStream().buffered()).use { zos ->
@@ -660,9 +571,7 @@ class InjectionEngine(private val context: Context) {
         log("repacked: ${out.length() / 1024} KB")
     }
 
-    // ══════════════════════════════════════════════════════════
-    // SIGN
-    // ══════════════════════════════════════════════════════════
+    // ── Sign ───────────────────────────────────────────────────
 
     private fun signFresh(unsigned: File, out: File) {
         ensureKeystore()
@@ -682,8 +591,8 @@ class InjectionEngine(private val context: Context) {
                 zos.putNextEntry(ZipEntry(name)); zos.write(data); zos.closeEntry()
             }
             put("META-INF/MANIFEST.MF", mf)
-            put("META-INF/CERT.SF",     sf)
-            put("META-INF/CERT.RSA",    rsa)
+            put("META-INF/CERT.SF", sf)
+            put("META-INF/CERT.RSA", rsa)
             ZipFile(unsigned).use { zip ->
                 zip.entries().asSequence().forEach { e ->
                     zos.putNextEntry(ZipEntry(e.name))
@@ -717,11 +626,7 @@ class InjectionEngine(private val context: Context) {
 
     private fun buildPkcs7(cert: X509Certificate, sig: ByteArray): ByteArray {
         val certDer = cert.encoded
-        fun len(n: Int) = when {
-            n < 0x80  -> byteArrayOf(n.toByte())
-            n < 0x100 -> byteArrayOf(0x81.toByte(), n.toByte())
-            else      -> byteArrayOf(0x82.toByte(), (n ushr 8).toByte(), (n and 0xFF).toByte())
-        }
+        fun len(n: Int) = when { n < 0x80 -> byteArrayOf(n.toByte()); n < 0x100 -> byteArrayOf(0x81.toByte(), n.toByte()); else -> byteArrayOf(0x82.toByte(), (n ushr 8).toByte(), (n and 0xFF).toByte()) }
         fun w(t: Int, d: ByteArray) = byteArrayOf(t.toByte()) + len(d.size) + d
         fun seq(vararg p: ByteArray) = w(0x30, p.reduce { a, b -> a + b })
         fun set(vararg p: ByteArray) = w(0x31, p.reduce { a, b -> a + b })
@@ -740,9 +645,7 @@ class InjectionEngine(private val context: Context) {
         return seq(sd, ctx(0, inner))
     }
 
-    // ══════════════════════════════════════════════════════════
-    // KEYSTORE
-    // ══════════════════════════════════════════════════════════
+    // ── Keystore ───────────────────────────────────────────────
 
     private fun ensureKeystore() {
         val f = File(context.filesDir, KS_FILE)
@@ -764,22 +667,18 @@ class InjectionEngine(private val context: Context) {
         val cls  = gen.javaClass
         val x500 = Class.forName("$bc.asn1.x500.X500Name")
             .getConstructor(String::class.java).newInstance("CN=ZovexInjector,O=Zovex,C=IL")
-        val now  = java.util.Date()
-        val exp  = java.util.Date(now.time + 3650L * 86400_000L)
-        cls.getMethod("setSerialNumber", java.math.BigInteger::class.java)
-            .invoke(gen, java.math.BigInteger(64, SecureRandom()))
+        val now  = java.util.Date(); val exp = java.util.Date(now.time + 3650L * 86400_000L)
+        cls.getMethod("setSerialNumber", java.math.BigInteger::class.java).invoke(gen, java.math.BigInteger(64, SecureRandom()))
         for (m in listOf("setIssuerDN", "setSubjectDN"))
             cls.getMethod(m, Class.forName("$bc.asn1.x500.X500Name")).invoke(gen, x500)
-        cls.getMethod("setNotBefore",  java.util.Date::class.java).invoke(gen, now)
-        cls.getMethod("setNotAfter",   java.util.Date::class.java).invoke(gen, exp)
-        cls.getMethod("setPublicKey",  PublicKey::class.java).invoke(gen, kp.public)
+        cls.getMethod("setNotBefore", java.util.Date::class.java).invoke(gen, now)
+        cls.getMethod("setNotAfter",  java.util.Date::class.java).invoke(gen, exp)
+        cls.getMethod("setPublicKey", PublicKey::class.java).invoke(gen, kp.public)
         cls.getMethod("setSignatureAlgorithm", String::class.java).invoke(gen, "SHA256WithRSAEncryption")
         return cls.getMethod("generate", PrivateKey::class.java).invoke(gen, kp.private) as X509Certificate
     }
 
-    // ══════════════════════════════════════════════════════════
-    // DELETE DIALOG
-    // ══════════════════════════════════════════════════════════
+    // ── Delete Dialog ──────────────────────────────────────────
 
     private fun disableDialogInFile(f: File): Boolean {
         val txt = f.readText()
@@ -803,14 +702,9 @@ class InjectionEngine(private val context: Context) {
         return done
     }
 
-    // ══════════════════════════════════════════════════════════
-    // HELPERS
-    // ══════════════════════════════════════════════════════════
+    // ── Helpers ────────────────────────────────────────────────
 
-    private fun workDir() =
-        File(context.cacheDir, "zovex_${System.currentTimeMillis()}").also { it.mkdirs() }
-
-    private fun outputApk(p: String) =
-        File(File(context.filesDir, "output").also { it.mkdirs() },
-            "${p}_${System.currentTimeMillis()}.apk")
+    private fun workDir() = File(context.cacheDir, "zovex_${System.currentTimeMillis()}").also { it.mkdirs() }
+    private fun outputApk(p: String) = File(File(context.filesDir, "output").also { it.mkdirs() }, "${p}_${System.currentTimeMillis()}.apk")
+    private fun fmtSize(b: Long) = when { b > 1048576 -> "${"%.1f".format(b/1048576.0)} MB"; b > 1024 -> "${b/1024} KB"; else -> "$b B" }
                               }
