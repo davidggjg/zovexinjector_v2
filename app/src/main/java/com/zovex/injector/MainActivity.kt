@@ -1,13 +1,20 @@
 package com.zovex.injector
 
+import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.provider.OpenableColumns
+import android.provider.Settings
 import android.view.View
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
 import com.zovex.injector.databinding.ActivityMainBinding
@@ -23,7 +30,10 @@ class MainActivity : AppCompatActivity() {
     private var outputApkPath: String? = null
     private val engine by lazy { InjectionEngine(this) }
 
-    companion object { private const val REQ_APK = 1001 }
+    companion object {
+        private const val REQ_APK  = 1001
+        private const val REQ_PERM = 1002
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -31,12 +41,60 @@ class MainActivity : AppCompatActivity() {
         setContentView(b.root)
         b.etOkText.setText("אישור")
         b.etPrefKey.setText("my_dialog_v1")
-        b.btnPickApk.setOnClickListener { pickApk() }
+        b.btnPickApk.setOnClickListener { checkPermsThenPick() }
         b.btnInject.setOnClickListener { run(false) }
         b.btnDeleteDialogs.setOnClickListener { run(true) }
         b.btnInstall.setOnClickListener { install() }
         b.btnShare.setOnClickListener { share() }
     }
+
+    // ── Permissions ────────────────────────────────────────────
+
+    private fun checkPermsThenPick() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            if (!Environment.isExternalStorageManager()) {
+                try {
+                    startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                        Uri.parse("package:$packageName")))
+                } catch (_: Exception) {
+                    startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION))
+                }
+                return
+            }
+        } else {
+            val perms = arrayOf(
+                Manifest.permission.READ_EXTERNAL_STORAGE,
+                Manifest.permission.WRITE_EXTERNAL_STORAGE
+            )
+            val missing = perms.filter {
+                ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+            }
+            if (missing.isNotEmpty()) {
+                ActivityCompat.requestPermissions(this, missing.toTypedArray(), REQ_PERM)
+                return
+            }
+        }
+        pickApk()
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, results: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, results)
+        if (requestCode == REQ_PERM && results.all { it == PackageManager.PERMISSION_GRANTED }) {
+            pickApk()
+        } else {
+            toast("נדרשות הרשאות קבצים")
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // אחרי חזרה מהגדרות הרשאות
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && Environment.isExternalStorageManager()) {
+            // הרשאה ניתנה
+        }
+    }
+
+    // ── Pick APK ───────────────────────────────────────────────
 
     private fun pickApk() {
         startActivityForResult(
@@ -84,6 +142,8 @@ class MainActivity : AppCompatActivity() {
             c.moveToFirst(); if (i >= 0) c.getString(i) else null
         }
 
+    // ── Run injection ──────────────────────────────────────────
+
     private fun run(delete: Boolean) {
         val apk = selectedApkPath ?: return toast("קודם בחר קובץ APK")
         if (!delete) {
@@ -94,8 +154,10 @@ class MainActivity : AppCompatActivity() {
         b.sectionProgress.visibility = View.VISIBLE
         b.tvLog.text = ""
         setButtons(false)
+
         engine.onStep = { m -> runOnUiThread { b.tvStep.text = m } }
         engine.onLog  = { m -> runOnUiThread { b.tvLog.append("$m\n") } }
+
         lifecycleScope.launch {
             val result = withContext(Dispatchers.IO) {
                 runCatching {
@@ -117,6 +179,8 @@ class MainActivity : AppCompatActivity() {
                     b.tvResultTitle.text = if (delete) "✅ דיאלוגים בוטלו!" else "✅ דיאלוג הוזרק!"
                     b.tvResultInfo.text  = "${File(path).name} • ${fmtSize(File(path).length())}"
                     b.sectionResult.visibility = View.VISIBLE
+                    // שמור גם ל-Downloads
+                    saveToDownloads(File(path))
                 },
                 onFailure = { e ->
                     b.tvError.text = e.message ?: "שגיאה לא ידועה"
@@ -126,12 +190,27 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun saveToDownloads(apk: File) {
+        try {
+            val downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+            downloads.mkdirs()
+            val dest = File(downloads, apk.name)
+            apk.copyTo(dest, overwrite = true)
+            engine.onLog?.invoke("  💾 נשמר ל-Downloads: ${dest.name}")
+        } catch (e: Exception) {
+            engine.onLog?.invoke("  ⚠️ לא הצלחתי לשמור ל-Downloads: ${e.message}")
+        }
+    }
+
+    // ── Install / Share ────────────────────────────────────────
+
     private fun install() {
         val path = outputApkPath ?: return
         val uri = FileProvider.getUriForFile(this, "$packageName.provider", File(path))
         try {
             startActivity(Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
-                data = uri; flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
+                data = uri
+                flags = Intent.FLAG_GRANT_READ_URI_PERMISSION
                 putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true)
             })
         } catch (_: Exception) {
@@ -152,6 +231,8 @@ class MainActivity : AppCompatActivity() {
         }, "שתף APK"))
     }
 
+    // ── UI helpers ─────────────────────────────────────────────
+
     private fun hideAll() {
         b.sectionResult.visibility   = View.GONE
         b.sectionError.visibility    = View.GONE
@@ -164,8 +245,8 @@ class MainActivity : AppCompatActivity() {
     }
     private fun toast(m: String) = Toast.makeText(this, m, Toast.LENGTH_SHORT).show()
     private fun fmtSize(b: Long) = when {
-        b > 1048576 -> "${"%.1f".format(b/1048576.0)} MB"
-        b > 1024    -> "${b/1024} KB"
+        b > 1048576 -> "${"%.1f".format(b / 1048576.0)} MB"
+        b > 1024    -> "${b / 1024} KB"
         else        -> "$b B"
     }
 }
