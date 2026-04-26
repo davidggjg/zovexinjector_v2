@@ -41,7 +41,7 @@ dependencies {
     implementation 'com.google.android.material:material:1.11.0'
     implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
-
-    // dexlib2 מ‑org.smali (גרסה 2.5.2 יציבה)
+    
+    // dexlib2 גרסה יציבה
     implementation 'org.smali:dexlib2:2.5.2'
 }
