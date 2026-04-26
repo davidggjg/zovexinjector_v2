@@ -1,0 +1,2 @@
+-keep class com.zovex.injector.** { *; }
+-dontwarn com.android.tools.smali.**
