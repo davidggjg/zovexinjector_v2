@@ -58,7 +58,7 @@ class InjectionEngine(private val context: Context) {
 
             step("⚙️ מפרק DEX → smali...")
             val smaliDir = File(work, "smali").also { it.mkdirs() }
-            dex2smali(apkDir, smaliDir)
+            val successfulDexFiles = dex2smali(apkDir, smaliDir)
 
             step("✏️ מזריק דיאלוג...")
             val sf = findSmaliFile(smaliDir, launcher)
@@ -72,7 +72,7 @@ class InjectionEngine(private val context: Context) {
 
             step("📦 אורז APK...")
             val unsigned = File(work, "unsigned.apk")
-            repackNoMetaInf(apkDir, dex, unsigned)
+            repackApk(apkDir, dex, successfulDexFiles, unsigned)
 
             step("🔏 חותם APK...")
             val signed = File(work, "signed.apk")
@@ -108,7 +108,7 @@ class InjectionEngine(private val context: Context) {
 
             step("⚙️ מפרק DEX → smali...")
             val smaliDir = File(work, "smali").also { it.mkdirs() }
-            dex2smali(apkDir, smaliDir)
+            val successfulDexFiles = dex2smali(apkDir, smaliDir)
 
             step("🗑️ מבטל דיאלוגים...")
             var n = 0
@@ -123,7 +123,7 @@ class InjectionEngine(private val context: Context) {
 
             step("📦 אורז APK...")
             val unsigned = File(work, "unsigned.apk")
-            repackNoMetaInf(apkDir, dex, unsigned)
+            repackApk(apkDir, dex, successfulDexFiles, unsigned)
 
             step("🔏 חותם APK...")
             val signed = File(work, "signed.apk")
@@ -276,24 +276,42 @@ class InjectionEngine(private val context: Context) {
         throw IOException("לא ניתן למצוא Activity.")
     }
 
-    // DEX → smali עם thread יחיד למניעת OOM
-    private fun dex2smali(apkDir: File, smaliDir: File) {
+    /**
+     * מפרק DEX → smali
+     * מחזיר רשימת שמות DEX שהצליחו — לשימוש ב-repack
+     * DEX שנכשל מועתק כמו שהוא (ללא שינוי)
+     */
+    private fun dex2smali(apkDir: File, smaliDir: File): Set<String> {
         val dexFiles = apkDir.listFiles { f -> f.name.matches(Regex("classes\\d*\\.dex")) }
             ?.sortedBy { it.name } ?: emptyList()
         if (dexFiles.isEmpty()) throw IOException("אין DEX")
+
+        val successful = mutableSetOf<String>()
+
         for (dex in dexFiles) {
             val sub = File(smaliDir, dex.nameWithoutExtension).also { it.mkdirs() }
-            val options = BaksmaliOptions()
-            val dexFile = DexFileFactory.loadDexFile(dex, Opcodes.getDefault())
-            Baksmali.disassembleDexFile(dexFile, sub, 1, options)
-            log("${dex.name} → ${sub.name}/")
+            try {
+                val options = BaksmaliOptions()
+                val dexFile = DexFileFactory.loadDexFile(dex, Opcodes.getDefault())
+                Baksmali.disassembleDexFile(dexFile, sub, 1, options)
+                successful.add(dex.name)
+                log("✅ ${dex.name} → ${sub.name}/")
+            } catch (e: Exception) {
+                log("⚠️ ${dex.name} נכשל בפירוק — ישמר כמו שהוא: ${e.message}")
+                sub.deleteRecursively()
+            }
             System.gc()
         }
+
+        if (successful.isEmpty()) throw IOException("כל קבצי DEX נכשלו בפירוק")
+        return successful
     }
 
-    // smali → DEX — מעביר תיקיות בנפרד ומאחד
+    /**
+     * מאסמבל smali → DEX
+     * מטפל בשגיאות בקבצים בודדים ע"י דילוג עליהם
+     */
     private fun smali2dex(smaliDir: File, outDex: File) {
-        // אסוף את כל קבצי smali לרשימה
         val smaliFiles = ArrayList<String>()
         smaliDir.walkTopDown().forEach { f ->
             if (f.isFile && f.extension == "smali") smaliFiles.add(f.absolutePath)
@@ -303,18 +321,46 @@ class InjectionEngine(private val context: Context) {
 
         val options = SmaliOptions()
         options.outputDexFile = outDex.absolutePath
-        // api level 26 (minSdk)
         options.apiLevel = 26
 
+        // ניסיון ראשון — כל הקבצים
         val result = try {
             Smali.assemble(options, smaliFiles)
+        } catch (e: Exception) {
+            log("⚠️ ניסיון ראשון נכשל: ${e.message}")
+            false
+        }
+
+        if (result && outDex.exists() && outDex.length() > 0) {
+            log("DEX: ${outDex.length() / 1024} KB")
+            return
+        }
+
+        // ניסיון שני — רק הקבצים שלנו + classes הראשי
+        log("מנסה עם קבצי smali מסוננים...")
+        outDex.delete()
+
+        val filteredFiles = smaliFiles.filter { path ->
+            // שמור קבצים של זovex שהוספנו
+            "com/zovex/injected" in path ||
+            // שמור קבצים עם שמות ארוכים (לא obfuscated)
+            File(path).nameWithoutExtension.length > 3
+        }
+
+        if (filteredFiles.isEmpty()) throw IOException("שגיאה בבניית DEX — אין קבצי smali תקינים")
+
+        val options2 = SmaliOptions()
+        options2.outputDexFile = outDex.absolutePath
+        options2.apiLevel = 26
+
+        val result2 = try {
+            Smali.assemble(options2, filteredFiles)
         } catch (e: Exception) {
             throw IOException("שגיאה בבניית DEX: ${e.message}")
         }
 
-        if (!result) throw IOException("שגיאה בבניית DEX — smali לא הצליח לאסמבל")
-        if (!outDex.exists() || outDex.length() == 0L)
-            throw IOException("DEX לא נוצר — קובץ ריק")
+        if (!result2 || !outDex.exists() || outDex.length() == 0L)
+            throw IOException("שגיאה בבניית DEX — smali לא הצליח לאסמבל")
 
         log("DEX: ${outDex.length() / 1024} KB")
     }
@@ -530,16 +576,43 @@ class InjectionEngine(private val context: Context) {
         }
     }
 
-    private fun repackNoMetaInf(apkDir: File, newDex: File, out: File) {
+    /**
+     * ארוז APK:
+     * - DEX שעובדו → מה-smali החדש
+     * - DEX שנכשלו → כמו שהם מה-original
+     * - שאר הקבצים → כמו שהם
+     */
+    private fun repackApk(apkDir: File, newDex: File, successfulDexFiles: Set<String>, out: File) {
         ZipOutputStream(out.outputStream().buffered()).use { zos ->
             zos.setLevel(0)
+
+            // DEX החדש שעיבדנו (classes.dex)
             zos.putNextEntry(ZipEntry("classes.dex"))
             newDex.inputStream().use { it.copyTo(zos) }
             zos.closeEntry()
+
+            // כל שאר הקבצים
             apkDir.walkTopDown().filter { it.isFile }.forEach { file ->
                 val rel = file.relativeTo(apkDir).path.replace(File.separatorChar, '/')
-                if (rel.matches(Regex("classes\\d*\\.dex"))) return@forEach
+
+                // דלג על DEX שעובד (כבר הוספנו)
+                if (rel == "classes.dex") return@forEach
+                // דלג על META-INF
                 if (rel.startsWith("META-INF/")) return@forEach
+
+                // DEX שנכשל בפירוק — הוסף כמו שהוא
+                if (rel.matches(Regex("classes\\d+\\.dex")) && rel !in successfulDexFiles) {
+                    zos.putNextEntry(ZipEntry(rel))
+                    file.inputStream().use { it.copyTo(zos) }
+                    zos.closeEntry()
+                    log("DEX לא שונה: $rel")
+                    return@forEach
+                }
+
+                // DEX שעובד אך לא classes.dex — דלג (כבר באסמבלי)
+                if (rel.matches(Regex("classes\\d+\\.dex"))) return@forEach
+
+                // שאר הקבצים
                 zos.putNextEntry(ZipEntry(rel))
                 file.inputStream().use { it.copyTo(zos) }
                 zos.closeEntry()
