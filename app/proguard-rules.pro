@@ -1,2 +1,0 @@
--keep class com.zovex.injector.** { *; }
--dontwarn org.bouncycastle.**
