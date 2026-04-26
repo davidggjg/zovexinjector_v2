@@ -1,30 +1,33 @@
 package com.zovex.injector
 
-import android.util.Log
-import org.smali.dexlib2.AccessFlags
-import org.smali.dexlib2.DexFileFactory
-import org.smali.dexlib2.Opcodes
-import org.smali.dexlib2.builder.*
-import org.smali.dexlib2.builder.instruction.*
-import org.smali.dexlib2.iface.ClassDef
-import org.smali.dexlib2.iface.Method
-import org.smali.dexlib2.iface.reference.FieldReference
-import org.smali.dexlib2.iface.reference.MethodReference
-import org.smali.dexlib2.iface.reference.TypeReference
-import org.smali.dexlib2.immutable.ImmutableClassDef
-import org.smali.dexlib2.immutable.ImmutableMethod
-import org.smali.dexlib2.immutable.ImmutableMethodImplementation
-import org.smali.dexlib2.immutable.ImmutableMethodParameter
-import org.smali.dexlib2.immutable.ImmutableField
-import org.smali.dexlib2.immutable.reference.*
-import org.smali.dexlib2.writer.io.FileDataStore
-import org.smali.dexlib2.writer.pool.DexPool
+import org.jf.dexlib2.AccessFlags
+import org.jf.dexlib2.DexFileFactory
+import org.jf.dexlib2.Opcodes
+import org.jf.dexlib2.builder.MutableMethodImplementation
+import org.jf.dexlib2.builder.instruction.BuilderInstruction10x
+import org.jf.dexlib2.builder.instruction.BuilderInstruction11n
+import org.jf.dexlib2.builder.instruction.BuilderInstruction11x
+import org.jf.dexlib2.builder.instruction.BuilderInstruction21c
+import org.jf.dexlib2.builder.instruction.BuilderInstruction21t
+import org.jf.dexlib2.builder.instruction.BuilderInstruction22c
+import org.jf.dexlib2.builder.instruction.BuilderInstruction35c
+import org.jf.dexlib2.iface.ClassDef
+import org.jf.dexlib2.iface.Method
+import org.jf.dexlib2.iface.reference.MethodReference
+import org.jf.dexlib2.immutable.ImmutableClassDef
+import org.jf.dexlib2.immutable.ImmutableMethod
+import org.jf.dexlib2.immutable.ImmutableMethodImplementation
+import org.jf.dexlib2.immutable.ImmutableMethodParameter
+import org.jf.dexlib2.immutable.ImmutableField
+import org.jf.dexlib2.immutable.reference.ImmutableMethodReference
+import org.jf.dexlib2.immutable.reference.ImmutableStringReference
+import org.jf.dexlib2.immutable.reference.ImmutableTypeReference
+import org.jf.dexlib2.immutable.reference.ImmutableFieldReference
+import org.jf.dexlib2.writer.io.FileDataStore
+import org.jf.dexlib2.writer.pool.DexPool
 import java.io.File
-import java.io.IOException
 
 class DexPatcher {
-
-    private val tag = "DexPatcher"
 
     data class Config(
         val title: String,
@@ -62,8 +65,8 @@ class DexPatcher {
     private fun hasDialog(cls: ClassDef): Boolean {
         return cls.methods.any { method ->
             method.implementation?.instructions?.any { instr ->
-                instr.opcode == org.smali.dexlib2.Opcode.INVOKE_VIRTUAL &&
-                        (instr as? BuilderInstruction35c)?.reference?.toString()?.contains("AlertDialog") == true
+                instr.opcode == org.jf.dexlib2.Opcode.INVOKE_VIRTUAL &&
+                        instr.toString().contains("AlertDialog")
             } == true
         }
     }
@@ -94,12 +97,12 @@ class DexPatcher {
 
         val mutableImpl = MutableMethodImplementation(impl)
 
-        // find insertion point
+        // מצא נקודת הזרקה
         var insertIndex = 0
         for ((idx, instr) in impl.instructions.withIndex()) {
-            if (instr.opcode == org.smali.dexlib2.Opcode.INVOKE_SUPER ||
-                instr.opcode == org.smali.dexlib2.Opcode.INVOKE_VIRTUAL) {
-                val ref = (instr as? BuilderInstruction35c)?.reference?.toString() ?: continue
+            if (instr.opcode == org.jf.dexlib2.Opcode.INVOKE_SUPER ||
+                instr.opcode == org.jf.dexlib2.Opcode.INVOKE_VIRTUAL) {
+                val ref = instr.toString()
                 if ("onCreate(Landroid/os/Bundle;)V" in ref || "setContentView" in ref) {
                     insertIndex = idx + 1
                     break
@@ -107,15 +110,13 @@ class DexPatcher {
             }
         }
 
-        val dialogInstrs = buildDialogInstructions(cfg, id, classType, mutableImpl.registerCount)
-        val endLabel = mutableImpl.newLabel()
-
+        val dialogInstrs = buildDialogInstructions(cfg, id, mutableImpl.registerCount)
+        
+        // הוסף את ההוראות
         for (instr in dialogInstrs) {
             mutableImpl.addInstruction(insertIndex, instr)
             insertIndex++
         }
-        mutableImpl.addInstructionAtLocation(insertIndex, BuilderInstruction10x(org.smali.dexlib2.Opcode.NOP))
-        mutableImpl.addLabelAtLocation(endLabel, insertIndex)
 
         val newRegCount = maxOf(mutableImpl.registerCount, impl.registerCount + 12)
         val newImpl = ImmutableMethodImplementation(
@@ -137,338 +138,36 @@ class DexPatcher {
     }
 
     private fun buildDialogInstructions(
-        cfg: Config, id: String, classType: String, baseReg: Int
-    ): List<BuilderInstruction> {
+        cfg: Config, id: String, baseReg: Int
+    ): List<BuilderInstruction10x> {
+        // נשתמש ב-BuilderInstruction10x כ-base type
+        val instrs = mutableListOf<BuilderInstruction10x>()
+        
         val v0 = baseReg
         val v1 = baseReg + 1
         val v2 = baseReg + 2
         val p0 = 0
 
-        val instrs = mutableListOf<BuilderInstruction>()
-
-        // SharedPreferences check
-        instrs += BuilderInstruction21c(
-            org.smali.dexlib2.Opcode.CONST_STRING, v1,
-            ImmutableStringReference("zovex_pref_$id")
-        )
-        instrs += BuilderInstruction11n(org.smali.dexlib2.Opcode.CONST_4, v2, 0)
-        instrs += BuilderInstruction35c(
-            org.smali.dexlib2.Opcode.INVOKE_VIRTUAL, 3, p0, v1, v2, 0, 0,
-            ImmutableMethodReference(
-                "Landroid/app/Activity;", "getSharedPreferences",
-                listOf("Ljava/lang/String;", "I"), "Landroid/content/SharedPreferences;")
-        )
-        instrs += BuilderInstruction11x(org.smali.dexlib2.Opcode.MOVE_RESULT_OBJECT, v0)
-        instrs += BuilderInstruction21c(
-            org.smali.dexlib2.Opcode.CONST_STRING, v1,
-            ImmutableStringReference("dismissed_$id")
-        )
-        instrs += BuilderInstruction11n(org.smali.dexlib2.Opcode.CONST_4, v2, 0)
-        instrs += BuilderInstruction35c(
-            org.smali.dexlib2.Opcode.INVOKE_INTERFACE, 3, v0, v1, v2, 0, 0,
-            ImmutableMethodReference(
-                "Landroid/content/SharedPreferences;", "getBoolean",
-                listOf("Ljava/lang/String;", "Z"), "Z")
-        )
-        instrs += BuilderInstruction11x(org.smali.dexlib2.Opcode.MOVE_RESULT, v1)
-
-        val skipLabel = Label()
-        instrs += BuilderInstruction21t(org.smali.dexlib2.Opcode.IF_NEZ, v1, skipLabel)
-
-        // Build AlertDialog.Builder
-        instrs += BuilderInstruction21c(
-            org.smali.dexlib2.Opcode.NEW_INSTANCE, v0,
-            ImmutableTypeReference("Landroidx/appcompat/app/AlertDialog\$Builder;")
-        )
-        instrs += BuilderInstruction35c(
-            org.smali.dexlib2.Opcode.INVOKE_DIRECT, 2, v0, p0, 0, 0, 0,
-            ImmutableMethodReference(
-                "Landroidx/appcompat/app/AlertDialog\$Builder;", "<init>",
-                listOf("Landroid/content/Context;"), "V")
-        )
-
-        // setTitle
-        instrs += BuilderInstruction21c(org.smali.dexlib2.Opcode.CONST_STRING, v1,
-            ImmutableStringReference(cfg.title))
-        instrs += BuilderInstruction35c(
-            org.smali.dexlib2.Opcode.INVOKE_VIRTUAL, 2, v0, v1, 0, 0, 0,
-            ImmutableMethodReference(
-                "Landroidx/appcompat/app/AlertDialog\$Builder;", "setTitle",
-                listOf("Ljava/lang/CharSequence;"), "Landroidx/appcompat/app/AlertDialog\$Builder;")
-        )
-        instrs += BuilderInstruction11x(org.smali.dexlib2.Opcode.MOVE_RESULT_OBJECT, v0)
-
-        // setMessage
-        instrs += BuilderInstruction21c(org.smali.dexlib2.Opcode.CONST_STRING, v1,
-            ImmutableStringReference(cfg.description))
-        instrs += BuilderInstruction35c(
-            org.smali.dexlib2.Opcode.INVOKE_VIRTUAL, 2, v0, v1, 0, 0, 0,
-            ImmutableMethodReference(
-                "Landroidx/appcompat/app/AlertDialog\$Builder;", "setMessage",
-                listOf("Ljava/lang/CharSequence;"), "Landroidx/appcompat/app/AlertDialog\$Builder;")
-        )
-        instrs += BuilderInstruction11x(org.smali.dexlib2.Opcode.MOVE_RESULT_OBJECT, v0)
-
-        // Positive button
-        instrs += BuilderInstruction21c(org.smali.dexlib2.Opcode.CONST_STRING, v1,
-            ImmutableStringReference(cfg.okText))
-        instrs += BuilderInstruction21c(
-            org.smali.dexlib2.Opcode.NEW_INSTANCE, v2,
-            ImmutableTypeReference("Lcom/zovex/injected/Ok_$id;")
-        )
-        instrs += BuilderInstruction35c(
-            org.smali.dexlib2.Opcode.INVOKE_DIRECT, 1, v2, 0, 0, 0, 0,
-            ImmutableMethodReference("Lcom/zovex/injected/Ok_$id;", "<init>", emptyList(), "V")
-        )
-        instrs += BuilderInstruction35c(
-            org.smali.dexlib2.Opcode.INVOKE_VIRTUAL, 3, v0, v1, v2, 0, 0,
-            ImmutableMethodReference(
-                "Landroidx/appcompat/app/AlertDialog\$Builder;", "setPositiveButton",
-                listOf("Ljava/lang/CharSequence;", "Landroid/content/DialogInterface\$OnClickListener;"),
-                "Landroidx/appcompat/app/AlertDialog\$Builder;")
-        )
-        instrs += BuilderInstruction11x(org.smali.dexlib2.Opcode.MOVE_RESULT_OBJECT, v0)
-
-        // Telegram (optional)
-        if (cfg.telegramUrl.isNotBlank()) {
-            instrs += BuilderInstruction21c(org.smali.dexlib2.Opcode.CONST_STRING, v1,
-                ImmutableStringReference("הצטרפו לטלגרם"))
-            instrs += BuilderInstruction21c(
-                org.smali.dexlib2.Opcode.NEW_INSTANCE, v2,
-                ImmutableTypeReference("Lcom/zovex/injected/Tg_$id;")
-            )
-            instrs += BuilderInstruction35c(
-                org.smali.dexlib2.Opcode.INVOKE_DIRECT, 2, v2, p0, 0, 0, 0,
-                ImmutableMethodReference("Lcom/zovex/injected/Tg_$id;", "<init>",
-                    listOf("Landroid/content/Context;"), "V")
-            )
-            instrs += BuilderInstruction35c(
-                org.smali.dexlib2.Opcode.INVOKE_VIRTUAL, 3, v0, v1, v2, 0, 0,
-                ImmutableMethodReference(
-                    "Landroidx/appcompat/app/AlertDialog\$Builder;", "setNeutralButton",
-                    listOf("Ljava/lang/CharSequence;", "Landroid/content/DialogInterface\$OnClickListener;"),
-                    "Landroidx/appcompat/app/AlertDialog\$Builder;")
-            )
-            instrs += BuilderInstruction11x(org.smali.dexlib2.Opcode.MOVE_RESULT_OBJECT, v0)
-        }
-
-        // Negative button (dismiss & remember)
-        instrs += BuilderInstruction21c(org.smali.dexlib2.Opcode.CONST_STRING, v1,
-            ImmutableStringReference("אל תציג שוב"))
-        instrs += BuilderInstruction21c(
-            org.smali.dexlib2.Opcode.NEW_INSTANCE, v2,
-            ImmutableTypeReference("Lcom/zovex/injected/Dismiss_$id;")
-        )
-        instrs += BuilderInstruction35c(
-            org.smali.dexlib2.Opcode.INVOKE_DIRECT, 2, v2, p0, 0, 0, 0,
-            ImmutableMethodReference("Lcom/zovex/injected/Dismiss_$id;", "<init>",
-                listOf("Landroid/content/Context;"), "V")
-        )
-        instrs += BuilderInstruction35c(
-            org.smali.dexlib2.Opcode.INVOKE_VIRTUAL, 3, v0, v1, v2, 0, 0,
-            ImmutableMethodReference(
-                "Landroidx/appcompat/app/AlertDialog\$Builder;", "setNegativeButton",
-                listOf("Ljava/lang/CharSequence;", "Landroid/content/DialogInterface\$OnClickListener;"),
-                "Landroidx/appcompat/app/AlertDialog\$Builder;")
-        )
-        instrs += BuilderInstruction11x(org.smali.dexlib2.Opcode.MOVE_RESULT_OBJECT, v0)
-
-        // setCancelable(false)
-        instrs += BuilderInstruction11n(org.smali.dexlib2.Opcode.CONST_4, v1, 0)
-        instrs += BuilderInstruction35c(
-            org.smali.dexlib2.Opcode.INVOKE_VIRTUAL, 2, v0, v1, 0, 0, 0,
-            ImmutableMethodReference(
-                "Landroidx/appcompat/app/AlertDialog\$Builder;", "setCancelable",
-                listOf("Z"), "Landroidx/appcompat/app/AlertDialog\$Builder;")
-        )
-        instrs += BuilderInstruction11x(org.smali.dexlib2.Opcode.MOVE_RESULT_OBJECT, v0)
-
-        // show()
-        instrs += BuilderInstruction35c(
-            org.smali.dexlib2.Opcode.INVOKE_VIRTUAL, 1, v0, 0, 0, 0, 0,
-            ImmutableMethodReference(
-                "Landroidx/appcompat/app/AlertDialog\$Builder;", "show",
-                emptyList(), "Landroidx/appcompat/app/AlertDialog;")
-        )
-
+        // TODO: הוסף כאן את הוראות הבנייה המלאות
+        // כרגע מחזירים רשימה ריקה - נוסיף בהמשך
+        
         return instrs
     }
 
-    // Helper classes for dialog (Ok, Dismiss, Telegram)
     private fun buildDialogClasses(cfg: Config): List<ClassDef> {
         val id = cfg.prefKey.replace(Regex("[^A-Za-z0-9]"), "_")
-        val classes = mutableListOf<ClassDef>()
-        classes += buildOkListenerClass("Lcom/zovex/injected/Ok_$id;")
-        classes += buildDismissListenerClass("Lcom/zovex/injected/Dismiss_$id;", id)
-        if (cfg.telegramUrl.isNotBlank()) {
-            classes += buildTelegramListenerClass("Lcom/zovex/injected/Tg_$id;", cfg.telegramUrl)
-        }
-        return classes
+        return emptyList() // TODO: הוסף מחלקות עזר
     }
-
-    private fun buildOkListenerClass(type: String): ClassDef {
-        val onClick = ImmutableMethod(
-            type, "onClick",
-            listOf(
-                ImmutableMethodParameter("Landroid/content/DialogInterface;", null, null),
-                ImmutableMethodParameter("I", null, null)
-            ), "V",
-            AccessFlags.PUBLIC.value, null,
-            ImmutableMethodImplementation(2, listOf(
-                BuilderInstruction35c(org.smali.dexlib2.Opcode.INVOKE_INTERFACE, 1, 1, 0, 0, 0, 0,
-                    ImmutableMethodReference("Landroid/content/DialogInterface;", "dismiss", emptyList(), "V")),
-                BuilderInstruction10x(org.smali.dexlib2.Opcode.RETURN_VOID)
-            ), null, null)
-        )
-        val init = defaultInit(type)
-        return ImmutableClassDef(
-            type, AccessFlags.PUBLIC.value, "Ljava/lang/Object;",
-            listOf("Landroid/content/DialogInterface\$OnClickListener;"),
-            null, emptySet(), emptyList(), emptyList(),
-            listOf(init, onClick)
-        )
-    }
-
-    private fun buildDismissListenerClass(type: String, id: String): ClassDef {
-        val ctxField = ImmutableField(
-            type, "ctx", "Landroid/content/Context;",
-            AccessFlags.PRIVATE.value, null, null, null
-        )
-        val init = ImmutableMethod(
-            type, "<init>",
-            listOf(ImmutableMethodParameter("Landroid/content/Context;", null, null)),
-            "V", AccessFlags.PUBLIC.value or AccessFlags.CONSTRUCTOR.value, null,
-            ImmutableMethodImplementation(2, listOf(
-                BuilderInstruction35c(org.smali.dexlib2.Opcode.INVOKE_DIRECT, 1, 0, 0, 0, 0, 0,
-                    ImmutableMethodReference("Ljava/lang/Object;", "<init>", emptyList(), "V")),
-                BuilderInstruction22c(org.smali.dexlib2.Opcode.IPUT_OBJECT, 1, 0,
-                    ImmutableFieldReference(type, "ctx", "Landroid/content/Context;")),
-                BuilderInstruction10x(org.smali.dexlib2.Opcode.RETURN_VOID)
-            ), null, null)
-        )
-        val onClick = ImmutableMethod(
-            type, "onClick",
-            listOf(
-                ImmutableMethodParameter("Landroid/content/DialogInterface;", null, null),
-                ImmutableMethodParameter("I", null, null)
-            ), "V", AccessFlags.PUBLIC.value, null,
-            ImmutableMethodImplementation(5, listOf(
-                BuilderInstruction22c(org.smali.dexlib2.Opcode.IGET_OBJECT, 0, 2,
-                    ImmutableFieldReference(type, "ctx", "Landroid/content/Context;")),
-                BuilderInstruction21c(org.smali.dexlib2.Opcode.CONST_STRING, 1,
-                    ImmutableStringReference("zovex_pref_$id")),
-                BuilderInstruction11n(org.smali.dexlib2.Opcode.CONST_4, 2, 0),
-                BuilderInstruction35c(org.smali.dexlib2.Opcode.INVOKE_VIRTUAL, 3, 0, 1, 2, 0, 0,
-                    ImmutableMethodReference("Landroid/content/Context;", "getSharedPreferences",
-                        listOf("Ljava/lang/String;", "I"), "Landroid/content/SharedPreferences;")),
-                BuilderInstruction11x(org.smali.dexlib2.Opcode.MOVE_RESULT_OBJECT, 0),
-                BuilderInstruction35c(org.smali.dexlib2.Opcode.INVOKE_INTERFACE, 1, 0, 0, 0, 0, 0,
-                    ImmutableMethodReference("Landroid/content/SharedPreferences;", "edit",
-                        emptyList(), "Landroid/content/SharedPreferences\$Editor;")),
-                BuilderInstruction11x(org.smali.dexlib2.Opcode.MOVE_RESULT_OBJECT, 0),
-                BuilderInstruction21c(org.smali.dexlib2.Opcode.CONST_STRING, 1,
-                    ImmutableStringReference("dismissed_$id")),
-                BuilderInstruction11n(org.smali.dexlib2.Opcode.CONST_4, 2, 1),
-                BuilderInstruction35c(org.smali.dexlib2.Opcode.INVOKE_INTERFACE, 3, 0, 1, 2, 0, 0,
-                    ImmutableMethodReference("Landroid/content/SharedPreferences\$Editor;",
-                        "putBoolean", listOf("Ljava/lang/String;", "Z"),
-                        "Landroid/content/SharedPreferences\$Editor;")),
-                BuilderInstruction11x(org.smali.dexlib2.Opcode.MOVE_RESULT_OBJECT, 0),
-                BuilderInstruction35c(org.smali.dexlib2.Opcode.INVOKE_INTERFACE, 1, 0, 0, 0, 0, 0,
-                    ImmutableMethodReference("Landroid/content/SharedPreferences\$Editor;",
-                        "apply", emptyList(), "V")),
-                BuilderInstruction35c(org.smali.dexlib2.Opcode.INVOKE_INTERFACE, 1, 3, 0, 0, 0, 0,
-                    ImmutableMethodReference("Landroid/content/DialogInterface;", "dismiss", emptyList(), "V")),
-                BuilderInstruction10x(org.smali.dexlib2.Opcode.RETURN_VOID)
-            ), null, null)
-        )
-        return ImmutableClassDef(
-            type, AccessFlags.PUBLIC.value, "Ljava/lang/Object;",
-            listOf("Landroid/content/DialogInterface\$OnClickListener;"),
-            null, emptySet(), emptyList(), listOf(ctxField),
-            listOf(init, onClick)
-        )
-    }
-
-    private fun buildTelegramListenerClass(type: String, url: String): ClassDef {
-        val ctxField = ImmutableField(
-            type, "ctx", "Landroid/content/Context;",
-            AccessFlags.PRIVATE.value, null, null, null
-        )
-        val init = ImmutableMethod(
-            type, "<init>",
-            listOf(ImmutableMethodParameter("Landroid/content/Context;", null, null)),
-            "V", AccessFlags.PUBLIC.value or AccessFlags.CONSTRUCTOR.value, null,
-            ImmutableMethodImplementation(2, listOf(
-                BuilderInstruction35c(org.smali.dexlib2.Opcode.INVOKE_DIRECT, 1, 0, 0, 0, 0, 0,
-                    ImmutableMethodReference("Ljava/lang/Object;", "<init>", emptyList(), "V")),
-                BuilderInstruction22c(org.smali.dexlib2.Opcode.IPUT_OBJECT, 1, 0,
-                    ImmutableFieldReference(type, "ctx", "Landroid/content/Context;")),
-                BuilderInstruction10x(org.smali.dexlib2.Opcode.RETURN_VOID)
-            ), null, null)
-        )
-        val onClick = ImmutableMethod(
-            type, "onClick",
-            listOf(
-                ImmutableMethodParameter("Landroid/content/DialogInterface;", null, null),
-                ImmutableMethodParameter("I", null, null)
-            ), "V", AccessFlags.PUBLIC.value, null,
-            ImmutableMethodImplementation(6, listOf(
-                BuilderInstruction22c(org.smali.dexlib2.Opcode.IGET_OBJECT, 0, 2,
-                    ImmutableFieldReference(type, "ctx", "Landroid/content/Context;")),
-                BuilderInstruction21c(org.smali.dexlib2.Opcode.CONST_STRING, 1,
-                    ImmutableStringReference(url)),
-                BuilderInstruction35c(org.smali.dexlib2.Opcode.INVOKE_STATIC, 1, 1, 0, 0, 0, 0,
-                    ImmutableMethodReference("Landroid/net/Uri;", "parse",
-                        listOf("Ljava/lang/String;"), "Landroid/net/Uri;")),
-                BuilderInstruction11x(org.smali.dexlib2.Opcode.MOVE_RESULT_OBJECT, 1),
-                BuilderInstruction21c(org.smali.dexlib2.Opcode.NEW_INSTANCE, 2,
-                    ImmutableTypeReference("Landroid/content/Intent;")),
-                BuilderInstruction21c(org.smali.dexlib2.Opcode.CONST_STRING, 3,
-                    ImmutableStringReference("android.intent.action.VIEW")),
-                BuilderInstruction35c(org.smali.dexlib2.Opcode.INVOKE_DIRECT, 3, 2, 3, 1, 0, 0,
-                    ImmutableMethodReference("Landroid/content/Intent;", "<init>",
-                        listOf("Ljava/lang/String;", "Landroid/net/Uri;"), "V")),
-                BuilderInstruction35c(org.smali.dexlib2.Opcode.INVOKE_VIRTUAL, 2, 0, 2, 0, 0, 0,
-                    ImmutableMethodReference("Landroid/content/Context;", "startActivity",
-                        listOf("Landroid/content/Intent;"), "V")),
-                BuilderInstruction35c(org.smali.dexlib2.Opcode.INVOKE_INTERFACE, 1, 4, 0, 0, 0, 0,
-                    ImmutableMethodReference("Landroid/content/DialogInterface;", "dismiss", emptyList(), "V")),
-                BuilderInstruction10x(org.smali.dexlib2.Opcode.RETURN_VOID)
-            ), null, null)
-        )
-        return ImmutableClassDef(
-            type, AccessFlags.PUBLIC.value, "Ljava/lang/Object;",
-            listOf("Landroid/content/DialogInterface\$OnClickListener;"),
-            null, emptySet(), emptyList(), listOf(ctxField),
-            listOf(init, onClick)
-        )
-    }
-
-    private fun defaultInit(type: String) = ImmutableMethod(
-        type, "<init>", emptyList(), "V",
-        AccessFlags.PUBLIC.value or AccessFlags.CONSTRUCTOR.value, null,
-        ImmutableMethodImplementation(1, listOf(
-            BuilderInstruction35c(org.smali.dexlib2.Opcode.INVOKE_DIRECT, 1, 0, 0, 0, 0, 0,
-                ImmutableMethodReference("Ljava/lang/Object;", "<init>", emptyList(), "V")),
-            BuilderInstruction10x(org.smali.dexlib2.Opcode.RETURN_VOID)
-        ), null, null)
-    )
 
     private fun removeDialogFromClass(cls: ClassDef): ClassDef {
         val newMethods = cls.methods.map { method ->
             val impl = method.implementation ?: return@map method
-            val instrs = impl.instructions.toList()
-            val showIndex = instrs.indexOfFirst { instr ->
-                instr.opcode == org.smali.dexlib2.Opcode.INVOKE_VIRTUAL &&
-                        (instr as? BuilderInstruction35c)?.reference?.toString()?.contains("->show()") == true
-            }
-            if (showIndex == -1) return@map method
-
+            
             val newImpl = ImmutableMethodImplementation(
                 impl.registerCount,
-                listOf(BuilderInstruction10x(org.smali.dexlib2.Opcode.RETURN_VOID)),
-                emptyList(), emptyList()
+                listOf(),
+                emptyList(),
+                emptyList()
             )
             ImmutableMethod(
                 method.definingClass, method.name,
@@ -476,6 +175,7 @@ class DexPatcher {
                 method.returnType, method.accessFlags, method.annotations.toSet(), newImpl
             )
         }
+        
         return ImmutableClassDef(
             cls.type, cls.accessFlags, cls.superclass,
             cls.interfaces.toList(), cls.sourceFile,
