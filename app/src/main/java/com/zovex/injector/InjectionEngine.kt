@@ -2,22 +2,15 @@ package com.zovex.injector
 
 import android.content.Context
 import android.util.Log
-import com.android.tools.smali.dexlib2.DexFileFactory
-import com.android.tools.smali.dexlib2.Opcodes
-import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
-import com.android.tools.smali.dexlib2.Opcode
 import java.io.File
 import java.io.IOException
-import java.util.zip.ZipEntry
-import java.util.zip.ZipFile
-import java.util.zip.ZipOutputStream
 
 class InjectionEngine(private val context: Context) {
 
     companion object { private const val TAG = "InjectionEngine" }
 
     var onStep: ((String) -> Unit)? = null
-    var onLog:  ((String) -> Unit)? = null
+    var onLog: ((String) -> Unit)? = null
     private fun step(m: String) { Log.d(TAG, m); onStep?.invoke(m) }
     private fun log(m: String)  { Log.d(TAG, "  $m"); onLog?.invoke("  $m") }
 
@@ -29,8 +22,7 @@ class InjectionEngine(private val context: Context) {
         val prefKey: String = "zovex_v1"
     )
 
-    private val signer  by lazy { ApkSigner(context) }
-    private val patcher by lazy { DexPatcher() }
+    private val signer by lazy { ApkSigner(context) }
 
     fun inject(inputApkPath: String, cfg: Config): String {
         val work = workDir()
@@ -38,64 +30,24 @@ class InjectionEngine(private val context: Context) {
             step("🔎 בודק APK...")
             validateApk(inputApkPath)
 
-            step("📦 פורק APK...")
-            val apkDir = File(work, "apk").also { it.mkdirs() }
-            unzip(inputApkPath, apkDir)
+            step("📦 מפרק APK עם Apktool...")
+            val decompiledDir = File(work, "decompiled")
+            decompileApk(inputApkPath, decompiledDir)
 
-            step("🔧 סורק ומתקן...")
-            scanAndFix(apkDir)
+            step("✏️ מזריק דיאלוג ל-smali...")
+            injectDialogToSmali(decompiledDir, cfg)
 
-            step("🔍 מאתר Activity...")
-            val launcher = findLauncher(apkDir)
-            log("Activity: $launcher")
-
-            step("✏️ מזריק דיאלוג לתוך DEX...")
-            val dexFiles = apkDir.listFiles { f -> f.name.matches(Regex("classes\\d*\\.dex")) }
-                ?.sortedBy { it.name } ?: emptyList()
-
-            val patchCfg = DexPatcher.Config(cfg.title, cfg.description,
-                cfg.okText, cfg.telegramUrl, cfg.prefKey)
-
-            // הזרק לקובץ DEX שמכיל את ה-Activity
-            var injected = false
-            for (dex in dexFiles) {
-                try {
-                    val dexFile = DexFileFactory.loadDexFile(dex, Opcodes.getDefault())
-                    val targetType = "L${launcher.replace('.', '/')};"
-                    val hasTarget = dexFile.classes.any { it.type == targetType }
-                    if (hasTarget) {
-                        log("מזריק ל-${dex.name}...")
-                        val patched = patcher.injectDialog(dex, patchCfg, launcher)
-                        patched.copyTo(dex, overwrite = true)
-                        patched.delete()
-                        injected = true
-                        log("✅ הוזרק!")
-                        break
-                    }
-                } catch (e: Exception) {
-                    log("⚠️ ${dex.name}: ${e.message}")
-                }
-            }
-
-            if (!injected) throw IOException(
-                "לא הצלחתי למצוא את ה-Activity ב-DEX\nAPK מוגן מדי.")
-
-            step("📦 אורז APK...")
-            val unsigned = File(work, "unsigned.apk")
-            repack(apkDir, unsigned)
+            step("🔏 בונה APK מחדש...")
+            val rebuiltApk = File(work, "rebuilt.apk")
+            rebuildApk(decompiledDir, rebuiltApk)
 
             step("🔏 חותם APK...")
             val signed = File(work, "signed.apk")
-            signer.sign(unsigned, signed)
-
-            step("✅ מאמת (5 פעמים)...")
-            repeat(5) { i -> log("אימות ${i+1}/5..."); verifyApk(signed) }
-            log("כל האימותים עברו ✅")
+            signer.sign(rebuiltApk, signed)
 
             val out = outputApk("patched")
             signed.copyTo(out, overwrite = true)
             step("✅ הסתיים!")
-            log("${out.name} — ${"%.1f".format(out.length() / 1048576.0)} MB")
             return out.absolutePath
 
         } finally { work.deleteRecursively() }
@@ -107,53 +59,20 @@ class InjectionEngine(private val context: Context) {
             step("🔎 בודק APK...")
             validateApk(inputApkPath)
 
-            step("📦 פורק APK...")
-            val apkDir = File(work, "apk").also { it.mkdirs() }
-            unzip(inputApkPath, apkDir)
+            step("📦 מפרק APK...")
+            val decompiledDir = File(work, "decompiled")
+            decompileApk(inputApkPath, decompiledDir)
 
-            step("🔧 סורק ומתקן...")
-            scanAndFix(apkDir)
+            step("🗑️ מוחק דיאלוגים...")
+            deleteDialogsFromSmali(decompiledDir)
 
-            step("🗑️ מחפש ומוחק דיאלוגים...")
-            val dexFiles = apkDir.listFiles { f -> f.name.matches(Regex("classes\\d*\\.dex")) }
-                ?.sortedBy { it.name } ?: emptyList()
-
-            var totalDeleted = 0
-            for (dex in dexFiles) {
-                try {
-                    val dexFile = DexFileFactory.loadDexFile(dex, Opcodes.getDefault())
-                    val hasDialogs = dexFile.classes.any { cls ->
-                        cls.methods.any { method ->
-                            method.implementation?.instructions?.any { instr ->
-                                instr.opcode == Opcode.INVOKE_VIRTUAL &&
-                                (instr as? ReferenceInstruction)?.reference?.toString()
-                                    ?.contains("AlertDialog") == true
-                            } == true
-                        }
-                    }
-                    if (hasDialogs) {
-                        log("מוחק דיאלוגים מ-${dex.name}...")
-                        val patched = patcher.deleteDialogs(dex)
-                        patched.copyTo(dex, overwrite = true)
-                        patched.delete()
-                        totalDeleted++
-                    }
-                } catch (e: Exception) {
-                    log("⚠️ ${dex.name}: ${e.message}")
-                }
-            }
-            log("בוטלו דיאלוגים ב-$totalDeleted קבצי DEX")
-
-            step("📦 אורז APK...")
-            val unsigned = File(work, "unsigned.apk")
-            repack(apkDir, unsigned)
+            step("🔏 בונה APK מחדש...")
+            val rebuiltApk = File(work, "rebuilt.apk")
+            rebuildApk(decompiledDir, rebuiltApk)
 
             step("🔏 חותם APK...")
             val signed = File(work, "signed.apk")
-            signer.sign(unsigned, signed)
-
-            step("✅ מאמת (5 פעמים)...")
-            repeat(5) { i -> log("אימות ${i+1}/5..."); verifyApk(signed) }
+            signer.sign(rebuiltApk, signed)
 
             val out = outputApk("no_dialogs")
             signed.copyTo(out, overwrite = true)
@@ -163,141 +82,237 @@ class InjectionEngine(private val context: Context) {
         } finally { work.deleteRecursively() }
     }
 
+    private fun decompileApk(apkPath: String, outDir: File) {
+        val apktoolJar = copyApktoolJar()
+        val process = ProcessBuilder(
+            "java", "-jar", apktoolJar.absolutePath,
+            "d", apkPath, "-o", outDir.absolutePath, "-f"
+        ).redirectErrorStream(true).start()
+        
+        val output = process.inputStream.bufferedReader().readText()
+        val exitCode = process.waitFor()
+        if (exitCode != 0) throw IOException("Apktool failed: $output")
+        log("APK פורק בהצלחה")
+    }
+
+    private fun rebuildApk(decompiledDir: File, outApk: File) {
+        val apktoolJar = copyApktoolJar()
+        val process = ProcessBuilder(
+            "java", "-jar", apktoolJar.absolutePath,
+            "b", decompiledDir.absolutePath, "-o", outApk.absolutePath
+        ).redirectErrorStream(true).start()
+        
+        val output = process.inputStream.bufferedReader().readText()
+        val exitCode = process.waitFor()
+        if (exitCode != 0) throw IOException("Apktool rebuild failed: $output")
+        log("APK נבנה מחדש")
+    }
+
+    private fun copyApktoolJar(): File {
+        val jarFile = File(context.cacheDir, "apktool.jar")
+        if (jarFile.exists()) return jarFile
+        
+        // הורדת apktool מהרשת
+        val url = java.net.URL("https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar")
+        url.openStream().use { input ->
+            jarFile.outputStream().use { output ->
+                input.copyTo(output)
+            }
+        }
+        return jarFile
+    }
+
+    private fun injectDialogToSmali(decompiledDir: File, cfg: Config) {
+        // מציאת קובץ ה-Activity הראשי
+        val manifestFile = File(decompiledDir, "AndroidManifest.xml")
+        val manifestContent = manifestFile.readText()
+        
+        val launcherActivity = findLauncherActivity(manifestContent)
+        log("Activity ראשי: $launcherActivity")
+        
+        // יצירת קוד smali לדיאלוג
+        val dialogSmali = generateDialogSmali(cfg)
+        val smaliDir = File(decompiledDir, "smali/com/zovex/injected")
+        smaliDir.mkdirs()
+        val dialogFile = File(smaliDir, "DialogInject.smali")
+        dialogFile.writeText(dialogSmali)
+        
+        // הוספת קריאה לדיאלוג ב-onCreate
+        val activitySmaliFile = findActivitySmaliFile(decompiledDir, launcherActivity)
+        if (activitySmaliFile != null) {
+            injectCallInOnCreate(activitySmaliFile, cfg.prefKey)
+            log("✓ דיאלוג הוזרק ל-${activitySmaliFile.name}")
+        } else {
+            throw IOException("לא נמצא קובץ smali של ה-Activity")
+        }
+    }
+
+    private fun deleteDialogsFromSmali(decompiledDir: File) {
+        val injectedDir = File(decompiledDir, "smali/com/zovex/injected")
+        if (injectedDir.exists()) {
+            injectedDir.deleteRecursively()
+            log("✓ קבצי דיאלוג נמחקו")
+        }
+        
+        // גם מסירים קריאות מתוך Activity
+        File(decompiledDir, "smali").walkTopDown().forEach { file ->
+            if (file.extension == "smali" && file.readText().contains("DialogInject")) {
+                val content = file.readText()
+                val cleaned = removeDialogCalls(content)
+                file.writeText(cleaned)
+                log("✓ נוקה קריאה מ-${file.name}")
+            }
+        }
+    }
+
+    private fun injectCallInOnCreate(smaliFile: File, prefKey: String) {
+        var content = smaliFile.readText()
+        
+        // מציאת שורת onCreate
+        val onCreatePattern = Regex("""\.method (public|protected) onCreate\(Landroid/os/Bundle;\)V""")
+        val match = onCreatePattern.find(content) ?: return
+        
+        val insertPoint = match.range.last + 1
+        val lines = content.lines().toMutableList()
+        
+        val callCode = listOf(
+            "    # ZovexInjector - Dialog Injection",
+            "    new-instance v0, Lcom/zovex/injected/DialogInject;",
+            "    const-string v1, \"$prefKey\"",
+            "    invoke-direct {v0, p0, v1}, Lcom/zovex/injected/DialogInject;-><init>(Landroid/content/Context;Ljava/lang/String;)V",
+            "    invoke-virtual {v0}, Lcom/zovex/injected/DialogInject;->show()V",
+            ""
+        )
+        
+        var lineIndex = 0
+        for (i in lines.indices) {
+            if (lines[i].contains("invoke-super") && lines[i].contains("onCreate")) {
+                lineIndex = i + 1
+                break
+            }
+        }
+        
+        lines.addAll(lineIndex, callCode)
+        smaliFile.writeText(lines.joinToString("\n"))
+    }
+
+    private fun findLauncherActivity(manifest: String): String {
+        val pattern = Regex("""android:name="([^"]+)".*?<intent-filter>.*?<action android:name="android\.intent\.action\.MAIN"/>.*?</intent-filter>""", RegexSet.DOT_MATCHES_ALL)
+        val match = pattern.find(manifest) ?: throw IOException("לא נמצא Activity ראשי")
+        var name = match.groupValues[1]
+        if (name.startsWith(".")) {
+            val pkgPattern = Regex("""package="([^"]+)"""")
+            val pkgMatch = pkgPattern.find(manifest)
+            val pkg = pkgMatch?.groupValues?.get(1) ?: ""
+            name = "$pkg$name"
+        }
+        return name.replace('.', '/')
+    }
+
+    private fun findActivitySmaliFile(dir: File, className: String): File? {
+        val smaliDir = File(dir, "smali")
+        val filePath = "$className.smali"
+        return File(smaliDir, filePath).takeIf { it.exists() }
+    }
+
+    private fun generateDialogSmali(cfg: Config): String {
+        return """
+.class public Lcom/zovex/injected/DialogInject;
+.super Ljava/lang/Object;
+.source "DialogInject.java"
+
+# instance fields
+.field private context:Landroid/content/Context;
+.field private prefKey:Ljava/lang/String;
+
+# direct methods
+.method public constructor <init>(Landroid/content/Context;Ljava/lang/String;)V
+    .locals 0
+
+    invoke-direct {p0}, Ljava/lang/Object;-><init>()V
+
+    iput-object p1, p0, Lcom/zovex/injected/DialogInject;->context:Landroid/content/Context;
+    iput-object p2, p0, Lcom/zovex/injected/DialogInject;->prefKey:Ljava/lang/String;
+
+    return-void
+.end method
+
+# virtual methods
+.method public show()V
+    .locals 5
+
+    # check if already shown
+    iget-object v0, p0, Lcom/zovex/injected/DialogInject;->context:Landroid/content/Context;
+    iget-object v1, p0, Lcom/zovex/injected/DialogInject;->prefKey:Ljava/lang/String;
+    const-string v2, "shown_"
+    invoke-virtual {v2, v1}, Ljava/lang/String;->concat(Ljava/lang/String;)Ljava/lang/String;
+    move-result-object v1
+    
+    const/4 v2, 0x0
+    invoke-virtual {v0, v1, v2}, Landroid/content/Context;->getSharedPreferences(Ljava/lang/String;I)Landroid/content/SharedPreferences;
+    move-result-object v0
+    
+    const-string v1, "shown"
+    invoke-interface {v0, v1, v2}, Landroid/content/SharedPreferences;->getBoolean(Ljava/lang/String;Z)Z
+    move-result v0
+    
+    if-eqz v0, :cond_0
+    return-void
+    :cond_0
+
+    # build dialog
+    new-instance v0, Landroidx/appcompat/app/AlertDialog$Builder;
+    iget-object v1, p0, Lcom/zovex/injected/DialogInject;->context:Landroid/content/Context;
+    invoke-direct {v0, v1}, Landroidx/appcompat/app/AlertDialog$Builder;-><init>(Landroid/content/Context;)V
+
+    # title
+    const-string v1, "${cfg.title}"
+    invoke-virtual {v0, v1}, Landroidx/appcompat/app/AlertDialog$Builder;->setTitle(Ljava/lang/CharSequence;)Landroidx/appcompat/app/AlertDialog$Builder;
+
+    # message
+    const-string v1, "${cfg.description}"
+    invoke-virtual {v0, v1}, Landroidx/appcompat/app/AlertDialog$Builder;->setMessage(Ljava/lang/CharSequence;)Landroidx/appcompat/app/AlertDialog$Builder;
+
+    # OK button
+    new-instance v1, Lcom/zovex/injected/OkClickListener;
+    invoke-direct {v1}, Lcom/zovex/injected/OkClickListener;-><init>()V
+    const-string v2, "${cfg.okText}"
+    invoke-virtual {v0, v2, v1}, Landroidx/appcompat/app/AlertDialog$Builder;->setPositiveButton(Ljava/lang/CharSequence;Landroid/content/DialogInterface$OnClickListener;)Landroidx/appcompat/app/AlertDialog$Builder;
+
+    # save that shown
+    iget-object v1, p0, Lcom/zovex/injected/DialogInject;->context:Landroid/content/Context;
+    iget-object v2, p0, Lcom/zovex/injected/DialogInject;->prefKey:Ljava/lang/String;
+    const-string v3, "shown_"
+    invoke-virtual {v3, v2}, Ljava/lang/String;->concat(Ljava/lang/String;)Ljava/lang/String;
+    move-result-object v2
+    invoke-virtual {v1, v2, v2}, Landroid/content/Context;->getSharedPreferences(Ljava/lang/String;I)Landroid/content/SharedPreferences;
+    move-result-object v1
+    invoke-interface {v1}, Landroid/content/SharedPreferences;->edit()Landroid/content/SharedPreferences$Editor;
+    move-result-object v1
+    const-string v2, "shown"
+    const/4 v3, 0x1
+    invoke-interface {v1, v2, v3}, Landroid/content/SharedPreferences$Editor;->putBoolean(Ljava/lang/String;Z)Landroid/content/SharedPreferences$Editor;
+    invoke-interface {v1}, Landroid/content/SharedPreferences$Editor;->apply()V
+
+    # show dialog
+    invoke-virtual {v0}, Landroidx/appcompat/app/AlertDialog$Builder;->show()Landroidx/appcompat/app/AlertDialog;
+
+    return-void
+.end method
+""".trimIndent()
+    }
+
+    private fun removeDialogCalls(content: String): String {
+        val pattern = Regex("""# ZovexInjector - Dialog Injection.*?invoke-virtual \{.*?\}.*?show\(\)V\n""", RegexSet.DOT_MATCHES_ALL)
+        return pattern.replace(content, "")
+    }
+
     private fun validateApk(path: String) {
         val f = File(path)
         if (!f.exists()) throw IOException("הקובץ לא קיים")
         if (f.length() < 1024) throw IOException("הקובץ קטן מדי")
-        val magic = ByteArray(4); f.inputStream().use { it.read(magic) }
-        if (magic[0] != 0x50.toByte() || magic[1] != 0x4B.toByte())
-            throw IOException("הקובץ אינו APK תקין.\nאם זה XAPK — חלץ את ה-APK הפנימי קודם.")
-        try {
-            ZipFile(path).use { zip ->
-                if (zip.entries().asSequence().count() == 0) throw IOException("APK ריק")
-            }
-        } catch (e: Exception) { throw IOException("APK פגום: ${e.message}") }
-    }
-
-    private fun scanAndFix(apkDir: File) {
-        val manifest = apkDir.walkTopDown().firstOrNull { it.name == "AndroidManifest.xml" }
-            ?: throw IOException("AndroidManifest.xml לא נמצא.")
-        val root = File(apkDir, "AndroidManifest.xml")
-        if (manifest.absolutePath != root.absolutePath) manifest.copyTo(root, overwrite = true)
-        val dexFiles = apkDir.listFiles { f -> f.name.matches(Regex("classes\\d*\\.dex")) } ?: emptyArray()
-        if (dexFiles.isEmpty()) throw IOException("אין DEX — APK מוגן?")
-        log("✅ ${dexFiles.size} DEX")
-    }
-
-    private fun verifyApk(apk: File) {
-        ZipFile(apk).use { zip ->
-            val e = zip.entries().asSequence().map { it.name }.toSet()
-            if (!e.any { it.matches(Regex("classes\\d*\\.dex")) }) throw IOException("חסר DEX")
-            if ("AndroidManifest.xml" !in e) throw IOException("חסר Manifest")
-            if (!e.any { it.startsWith("META-INF/") && it.endsWith(".RSA") }) throw IOException("חסרה חתימה")
-        }
-    }
-
-    private fun unzip(apkPath: String, outDir: File) {
-        ZipFile(apkPath).use { zip ->
-            zip.entries().asSequence().forEach { e ->
-                val f = File(outDir, e.name)
-                if (!f.canonicalPath.startsWith(outDir.canonicalPath)) return@forEach
-                if (e.isDirectory) { f.mkdirs(); return@forEach }
-                f.parentFile?.mkdirs()
-                zip.getInputStream(e).use { src -> f.outputStream().use { src.copyTo(it) } }
-            }
-        }
-    }
-
-    private fun findLauncher(apkDir: File): String {
-        val mf = File(apkDir, "AndroidManifest.xml")
-        val bytes = mf.readBytes()
-        return try {
-            if (bytes[0] == '<'.code.toByte()) parseText(mf.readText()) else parseBinary(bytes)
-        } catch (e: Exception) {
-            log("⚠️ Manifest fallback לDEX")
-            findLauncherFromDex(apkDir)
-        }
-    }
-
-    private fun parseText(xml: String): String {
-        val pkg = Regex("""package="([^"]+)"""").find(xml)?.groupValues?.get(1) ?: ""
-        for (m in Regex("""<activity\b.*?</activity>""", RegexOption.DOT_MATCHES_ALL).findAll(xml)) {
-            val b = m.value
-            if ("android.intent.action.MAIN" in b && "android.intent.category.LAUNCHER" in b) {
-                val n = Regex("""android:name="([^"]+)"""").find(b)?.groupValues?.get(1) ?: continue
-                return if (n.startsWith(".")) "$pkg$n" else n
-            }
-        }
-        throw IOException("MAIN+LAUNCHER לא נמצא")
-    }
-
-    private fun parseBinary(data: ByteArray): String {
-        val strings = mutableListOf<String>()
-        val buf = java.nio.ByteBuffer.wrap(data).order(java.nio.ByteOrder.LITTLE_ENDIAN)
-        try {
-            buf.int; buf.int; buf.int; buf.int
-            val count = buf.int; buf.int; buf.int; buf.int; buf.int
-            val offsets = IntArray(count) { buf.int }
-            val base = buf.position()
-            for (i in 0 until count) {
-                try {
-                    val p = base + offsets[i]
-                    val len = (data[p].toInt() and 0xFF) or ((data[p+1].toInt() and 0xFF) shl 8)
-                    val sb = StringBuilder()
-                    for (c in 0 until len) {
-                        val cp = p + 2 + c * 2
-                        if (cp + 1 < data.size) {
-                            val ch = ((data[cp].toInt() and 0xFF) or ((data[cp+1].toInt() and 0xFF) shl 8)).toChar()
-                            if (ch != '\u0000') sb.append(ch)
-                        }
-                    }
-                    strings.add(sb.toString())
-                } catch (_: Exception) { strings.add("") }
-            }
-        } catch (_: Exception) {}
-        val mainIdx = strings.indexOfFirst { it == "android.intent.action.MAIN" }
-        if (mainIdx > 0) {
-            for (i in mainIdx downTo maxOf(0, mainIdx - 80)) {
-                val s = strings.getOrNull(i) ?: continue
-                if (s.contains('.') && (s.endsWith("Activity") || "Main" in s)) return s
-            }
-        }
-        return strings.firstOrNull { it.contains('.') && it.endsWith("Activity") }
-            ?: throw IOException("לא ניתן לפרסר Manifest")
-    }
-
-    private fun findLauncherFromDex(apkDir: File): String {
-        apkDir.listFiles { f -> f.name.matches(Regex("classes\\d*\\.dex")) }
-            ?.sortedBy { it.name }?.forEach { dex ->
-                try {
-                    DexFileFactory.loadDexFile(dex, Opcodes.getDefault()).classes.forEach { cls ->
-                        val name = cls.type.replace('/', '.').trimStart('L').trimEnd(';')
-                        val hasOnCreate = cls.methods.any { it.name == "onCreate" }
-                        val superType = cls.superclass ?: ""
-                        if (hasOnCreate && (superType.contains("Activity") || superType.contains("AppCompat"))) {
-                            log("מצא: $name"); return name
-                        }
-                    }
-                } catch (_: Exception) {}
-            }
-        throw IOException("לא ניתן למצוא Activity")
-    }
-
-    private fun repack(apkDir: File, out: File) {
-        ZipOutputStream(out.outputStream().buffered()).use { zos ->
-            zos.setLevel(0)
-            apkDir.walkTopDown().filter { it.isFile }.forEach { file ->
-                val rel = file.relativeTo(apkDir).path.replace(File.separatorChar, '/')
-                if (rel.startsWith("META-INF/")) return@forEach
-                zos.putNextEntry(ZipEntry(rel))
-                file.inputStream().use { it.copyTo(zos) }
-                zos.closeEntry()
-            }
-        }
-        log("repacked: ${out.length() / 1024} KB")
     }
 
     private fun workDir() = File(context.cacheDir, "zovex_${System.currentTimeMillis()}").also { it.mkdirs() }
-    private fun outputApk(p: String) = File(File(context.filesDir, "output").also { it.mkdirs() },
-        "${p}_${System.currentTimeMillis()}.apk")
-                              }
+    private fun outputApk(p: String) = File(File(context.filesDir, "output").also { it.mkdirs() }, "${p}_${System.currentTimeMillis()}.apk")
+                                   }
