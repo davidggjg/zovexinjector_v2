@@ -5,7 +5,6 @@ import com.android.tools.smali.dexlib2.AccessFlags
 import com.android.tools.smali.dexlib2.DexFileFactory
 import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.Opcodes
-import com.android.tools.smali.dexlib2.builder.MethodImplementationBuilder
 import com.android.tools.smali.dexlib2.builder.instruction.*
 import com.android.tools.smali.dexlib2.iface.ClassDef
 import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
@@ -61,21 +60,23 @@ class DexPatcher {
         return outDex
     }
 
-    // ── Convert any class to ImmutableClassDef ─────────────────
+    // ── Convert to Immutable ───────────────────────────────────
 
     private fun toImmutable(cls: ClassDef): ImmutableClassDef {
+        val allFields = ((cls.staticFields ?: emptyList()) +
+                        (cls.instanceFields ?: emptyList())).map {
+            ImmutableField(it.definingClass, it.name, it.type,
+                it.accessFlags, null, null, null)
+        }
+        val allMethods = cls.methods?.map { toImmutableMethod(it) } ?: emptyList()
+
         return ImmutableClassDef(
             cls.type, cls.accessFlags, cls.superclass,
             cls.interfaces?.toList(),
             cls.sourceFile,
             cls.annotations?.map { ImmutableAnnotation(it.visibility, it.type, null) }?.toSet(),
-            cls.staticFields?.map { ImmutableField(it.definingClass, it.name, it.type,
-                it.accessFlags, null, it.annotations?.map {
-                    ImmutableAnnotation(it.visibility, it.type, null) }?.toSet(), null) },
-            cls.instanceFields?.map { ImmutableField(it.definingClass, it.name, it.type,
-                it.accessFlags, null, it.annotations?.map {
-                    ImmutableAnnotation(it.visibility, it.type, null) }?.toSet(), null) },
-            cls.methods?.map { toImmutableMethod(it) }
+            allFields,
+            allMethods
         )
     }
 
@@ -85,7 +86,7 @@ class DexPatcher {
             m.parameters?.map { ImmutableMethodParameter(it.type, null, it.name) },
             m.returnType, m.accessFlags,
             m.annotations?.map { ImmutableAnnotation(it.visibility, it.type, null) }?.toSet(),
-            null, // hiddenApiRestrictions
+            null,
             m.implementation?.let { impl ->
                 ImmutableMethodImplementation(
                     impl.registerCount,
@@ -109,14 +110,17 @@ class DexPatcher {
             }
         }
 
+        val allFields = ((cls.staticFields ?: emptyList()) +
+                        (cls.instanceFields ?: emptyList())).map {
+            ImmutableField(it.definingClass, it.name, it.type,
+                it.accessFlags, null, null, null)
+        }
+
         return ImmutableClassDef(
             cls.type, cls.accessFlags, cls.superclass,
             cls.interfaces?.toList(), cls.sourceFile,
             cls.annotations?.map { ImmutableAnnotation(it.visibility, it.type, null) }?.toSet(),
-            cls.staticFields?.map { ImmutableField(it.definingClass, it.name, it.type,
-                it.accessFlags, null, null, null) },
-            cls.instanceFields?.map { ImmutableField(it.definingClass, it.name, it.type,
-                it.accessFlags, null, null, null) },
+            allFields,
             newMethods
         )
     }
@@ -131,7 +135,6 @@ class DexPatcher {
         val id = cfg.prefKey.replace(Regex("[^A-Za-z0-9]"), "_")
         val existingInstrs = impl.instructions.toList()
 
-        // מצא נקודת הזרקה — אחרי super.onCreate או setContentView
         var insertIdx = 0
         for ((i, instr) in existingInstrs.withIndex()) {
             if (instr.opcode == Opcode.INVOKE_VIRTUAL || instr.opcode == Opcode.INVOKE_SUPER) {
@@ -143,19 +146,15 @@ class DexPatcher {
             }
         }
 
-        // registers: הקיימים + 3 חדשים
-        val origRegs = impl.registerCount
+        val origRegs  = impl.registerCount
         val newRegCount = origRegs + 3
         val v0 = origRegs
         val v1 = origRegs + 1
         val v2 = origRegs + 2
-        // p0 = this
-        val paramCount = method.parameters?.size ?: 0
-        val p0 = newRegCount - paramCount - 1
+        val paramCount = (method.parameters?.size ?: 0) + 1 // +1 for this
+        val p0 = newRegCount - paramCount
 
-        // בנה instructions עם MethodImplementationBuilder
-        val builder = buildDialogCode(cfg, id, p0, v0, v1, v2)
-        val dialogInstrs = builder.toList()
+        val dialogInstrs = buildDialogCode(cfg, id, p0, v0, v1, v2)
 
         val allInstrs = existingInstrs.toMutableList()
         allInstrs.addAll(insertIdx, dialogInstrs)
@@ -175,7 +174,7 @@ class DexPatcher {
         )
     }
 
-    // ── Build dialog code using MethodImplementationBuilder ────
+    // ── Build dialog instructions ──────────────────────────────
 
     private fun buildDialogCode(
         cfg: Config, id: String, p0: Int, v0: Int, v1: Int, v2: Int
@@ -201,8 +200,9 @@ class DexPatcher {
                 listOf("Ljava/lang/String;", "Z"), "Z"))
         list += BuilderInstruction11x(Opcode.MOVE_RESULT, v1)
 
-        // skip count — כמה instructions יש בדיאלוג
+        // כמה instructions יש בדיאלוג (אחרי ה-if-nez)
         val dialogBodySize = if (cfg.telegramUrl.isNotBlank()) 28 else 24
+        // if-nez: קפוץ קדימה dialogBodySize+1 instructions
         list += BuilderInstruction21t(Opcode.IF_NEZ, v1, dialogBodySize + 1)
 
         // new AlertDialog.Builder(this)
@@ -285,7 +285,7 @@ class DexPatcher {
             mref("Landroidx/appcompat/app/AlertDialog\$Builder;", "show",
                 emptyList(), "Landroidx/appcompat/app/AlertDialog;"))
 
-        // NOP — end
+        // NOP — end label
         list += BuilderInstruction10x(Opcode.NOP)
 
         return list
@@ -329,7 +329,8 @@ class DexPatcher {
         return ImmutableClassDef(type, AccessFlags.PUBLIC.value,
             "Ljava/lang/Object;",
             listOf("Landroid/content/DialogInterface\$OnClickListener;"),
-            null, null, null, null,
+            null, null,
+            emptyList<ImmutableField>(),
             listOf(init, onClick))
     }
 
@@ -338,7 +339,6 @@ class DexPatcher {
         fun mref(cls: String, name: String, params: List<String>, ret: String) =
             ImmutableMethodReference(cls, name, params, ret)
         val fref = ImmutableFieldReference(type, "ctx", "Landroid/content/Context;")
-
         val ctxField = ImmutableField(type, "ctx", "Landroid/content/Context;",
             AccessFlags.PRIVATE.value, null, null, null)
 
@@ -390,7 +390,7 @@ class DexPatcher {
         return ImmutableClassDef(type, AccessFlags.PUBLIC.value,
             "Ljava/lang/Object;",
             listOf("Landroid/content/DialogInterface\$OnClickListener;"),
-            null, null, null,
+            null, null,
             listOf(ctxField),
             listOf(init, onClick))
     }
@@ -400,7 +400,6 @@ class DexPatcher {
         fun mref(cls: String, name: String, params: List<String>, ret: String) =
             ImmutableMethodReference(cls, name, params, ret)
         val fref = ImmutableFieldReference(type, "ctx", "Landroid/content/Context;")
-
         val ctxField = ImmutableField(type, "ctx", "Landroid/content/Context;",
             AccessFlags.PRIVATE.value, null, null, null)
 
@@ -444,7 +443,7 @@ class DexPatcher {
         return ImmutableClassDef(type, AccessFlags.PUBLIC.value,
             "Ljava/lang/Object;",
             listOf("Landroid/content/DialogInterface\$OnClickListener;"),
-            null, null, null,
+            null, null,
             listOf(ctxField),
             listOf(init, onClick))
     }
@@ -453,16 +452,13 @@ class DexPatcher {
 
     private fun removeDialogFromClass(cls: ClassDef): ImmutableClassDef {
         val newMethods = cls.methods.map { method ->
-            val impl = method.implementation
-            if (impl == null) return@map toImmutableMethod(method)
-
+            val impl = method.implementation ?: return@map toImmutableMethod(method)
             val instrs = impl.instructions.toList()
             val showIdx = instrs.indexOfFirst { instr ->
                 instr.opcode == Opcode.INVOKE_VIRTUAL &&
                 (instr as? ReferenceInstruction)?.reference?.toString()
                     ?.contains("->show()") == true
             }
-
             if (showIdx <= 0) return@map toImmutableMethod(method)
 
             val newInstrs = listOf(BuilderInstruction10x(Opcode.RETURN_VOID)) +
@@ -479,14 +475,17 @@ class DexPatcher {
             )
         }
 
+        val allFields = ((cls.staticFields ?: emptyList()) +
+                        (cls.instanceFields ?: emptyList())).map {
+            ImmutableField(it.definingClass, it.name, it.type,
+                it.accessFlags, null, null, null)
+        }
+
         return ImmutableClassDef(
             cls.type, cls.accessFlags, cls.superclass,
             cls.interfaces?.toList(), cls.sourceFile,
             cls.annotations?.map { ImmutableAnnotation(it.visibility, it.type, null) }?.toSet(),
-            cls.staticFields?.map { ImmutableField(it.definingClass, it.name, it.type,
-                it.accessFlags, null, null, null) },
-            cls.instanceFields?.map { ImmutableField(it.definingClass, it.name, it.type,
-                it.accessFlags, null, null, null) },
+            allFields,
             newMethods
         )
     }
