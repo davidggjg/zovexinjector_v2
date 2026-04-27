@@ -129,7 +129,6 @@ class DexPatcher {
         cfg: Config
     ): ImmutableMethod {
         val impl = method.implementation ?: return toImmutableMethod(method)
-
         val id = cfg.prefKey.replace(Regex("[^A-Za-z0-9]"), "_")
         val existingInstrs = impl.instructions.toList()
 
@@ -152,7 +151,7 @@ class DexPatcher {
         val paramCount = (method.parameters?.size ?: 0) + 1
         val p0 = newRegCount - paramCount
 
-        // בנה את ה-dialog code עם MethodImplementationBuilder שמטפל ב-labels
+        // בנה dialog instructions עם MethodImplementationBuilder + labels נכונים
         val dialogInstrs = buildDialogInstructions(cfg, id, p0, v0, v1, v2)
 
         val allInstrs = existingInstrs.toMutableList()
@@ -173,7 +172,7 @@ class DexPatcher {
         )
     }
 
-    // ── Build dialog using MethodImplementationBuilder ─────────
+    // ── Build dialog instructions ──────────────────────────────
 
     private fun buildDialogInstructions(
         cfg: Config, id: String, p0: Int, v0: Int, v1: Int, v2: Int
@@ -184,112 +183,113 @@ class DexPatcher {
         fun mref(cls: String, name: String, params: List<String>, ret: String) =
             ImmutableMethodReference(cls, name, params, ret)
 
-        // משתמש ב-MethodImplementationBuilder כדי לטפל ב-labels בצורה נכונה
-        val builder = MethodImplementationBuilder(v2 + 1)
+        // MethodImplementationBuilder עם labels — הדרך הנכונה
+        val mb = MethodImplementationBuilder(v2 + 1)
 
         // SharedPreferences check
-        builder.addInstruction(BuilderInstruction21c(Opcode.CONST_STRING, v1, str("zovex_pref_$id")))
-        builder.addInstruction(BuilderInstruction11n(Opcode.CONST_4, v2, 0))
-        builder.addInstruction(BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 3, p0, v1, v2, 0, 0,
+        mb.addInstruction(BuilderInstruction21c(Opcode.CONST_STRING, v1, str("zovex_pref_$id")))
+        mb.addInstruction(BuilderInstruction11n(Opcode.CONST_4, v2, 0))
+        mb.addInstruction(BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 3, p0, v1, v2, 0, 0,
             mref("Landroid/app/Activity;", "getSharedPreferences",
                 listOf("Ljava/lang/String;", "I"), "Landroid/content/SharedPreferences;")))
-        builder.addInstruction(BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, v0))
-        builder.addInstruction(BuilderInstruction21c(Opcode.CONST_STRING, v1, str("dismissed_$id")))
-        builder.addInstruction(BuilderInstruction35c(Opcode.INVOKE_INTERFACE, 3, v0, v1, v2, 0, 0,
+        mb.addInstruction(BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, v0))
+        mb.addInstruction(BuilderInstruction21c(Opcode.CONST_STRING, v1, str("dismissed_$id")))
+        mb.addInstruction(BuilderInstruction35c(Opcode.INVOKE_INTERFACE, 3, v0, v1, v2, 0, 0,
             mref("Landroid/content/SharedPreferences;", "getBoolean",
                 listOf("Ljava/lang/String;", "Z"), "Z")))
-        builder.addInstruction(BuilderInstruction11x(Opcode.MOVE_RESULT, v1))
+        mb.addInstruction(BuilderInstruction11x(Opcode.MOVE_RESULT, v1))
 
-        // if dismissed → skip to end label
-        val endLabel = builder.newLabelForIndex(0) // placeholder, נחבר אחרי
-        builder.addInstruction(BuilderInstruction21t(Opcode.IF_NEZ, v1, endLabel))
+        // if dismissed → קפוץ לסוף
+        // משתמש ב-addLabel + Label object
+        val endLabel = mb.addLabel("end_$id")
+        // if-nez v1 → end_label
+        mb.addInstruction(BuilderInstruction21t(Opcode.IF_NEZ, v1, endLabel))
 
         // new AlertDialog.Builder(this)
-        builder.addInstruction(BuilderInstruction21c(Opcode.NEW_INSTANCE, v0,
+        mb.addInstruction(BuilderInstruction21c(Opcode.NEW_INSTANCE, v0,
             type("Landroidx/appcompat/app/AlertDialog\$Builder;")))
-        builder.addInstruction(BuilderInstruction35c(Opcode.INVOKE_DIRECT, 2, v0, p0, 0, 0, 0,
+        mb.addInstruction(BuilderInstruction35c(Opcode.INVOKE_DIRECT, 2, v0, p0, 0, 0, 0,
             mref("Landroidx/appcompat/app/AlertDialog\$Builder;", "<init>",
                 listOf("Landroid/content/Context;"), "V")))
 
         // setTitle
-        builder.addInstruction(BuilderInstruction21c(Opcode.CONST_STRING, v1, str(cfg.title)))
-        builder.addInstruction(BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 2, v0, v1, 0, 0, 0,
+        mb.addInstruction(BuilderInstruction21c(Opcode.CONST_STRING, v1, str(cfg.title)))
+        mb.addInstruction(BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 2, v0, v1, 0, 0, 0,
             mref("Landroidx/appcompat/app/AlertDialog\$Builder;", "setTitle",
                 listOf("Ljava/lang/CharSequence;"),
                 "Landroidx/appcompat/app/AlertDialog\$Builder;")))
-        builder.addInstruction(BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, v0))
+        mb.addInstruction(BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, v0))
 
         // setMessage
-        builder.addInstruction(BuilderInstruction21c(Opcode.CONST_STRING, v1, str(cfg.description)))
-        builder.addInstruction(BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 2, v0, v1, 0, 0, 0,
+        mb.addInstruction(BuilderInstruction21c(Opcode.CONST_STRING, v1, str(cfg.description)))
+        mb.addInstruction(BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 2, v0, v1, 0, 0, 0,
             mref("Landroidx/appcompat/app/AlertDialog\$Builder;", "setMessage",
                 listOf("Ljava/lang/CharSequence;"),
                 "Landroidx/appcompat/app/AlertDialog\$Builder;")))
-        builder.addInstruction(BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, v0))
+        mb.addInstruction(BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, v0))
 
         // OK button
-        builder.addInstruction(BuilderInstruction21c(Opcode.CONST_STRING, v1, str(cfg.okText)))
-        builder.addInstruction(BuilderInstruction21c(Opcode.NEW_INSTANCE, v2,
+        mb.addInstruction(BuilderInstruction21c(Opcode.CONST_STRING, v1, str(cfg.okText)))
+        mb.addInstruction(BuilderInstruction21c(Opcode.NEW_INSTANCE, v2,
             type("Lcom/zovex/injected/Ok_$id;")))
-        builder.addInstruction(BuilderInstruction35c(Opcode.INVOKE_DIRECT, 1, v2, 0, 0, 0, 0,
+        mb.addInstruction(BuilderInstruction35c(Opcode.INVOKE_DIRECT, 1, v2, 0, 0, 0, 0,
             mref("Lcom/zovex/injected/Ok_$id;", "<init>", emptyList(), "V")))
-        builder.addInstruction(BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 3, v0, v1, v2, 0, 0,
+        mb.addInstruction(BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 3, v0, v1, v2, 0, 0,
             mref("Landroidx/appcompat/app/AlertDialog\$Builder;", "setPositiveButton",
                 listOf("Ljava/lang/CharSequence;",
                     "Landroid/content/DialogInterface\$OnClickListener;"),
                 "Landroidx/appcompat/app/AlertDialog\$Builder;")))
-        builder.addInstruction(BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, v0))
+        mb.addInstruction(BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, v0))
 
         // Telegram (optional)
         if (cfg.telegramUrl.isNotBlank()) {
-            builder.addInstruction(BuilderInstruction21c(Opcode.CONST_STRING, v1,
+            mb.addInstruction(BuilderInstruction21c(Opcode.CONST_STRING, v1,
                 str("\u05d4\u05e6\u05d8\u05e8\u05e4\u05d5 \u05dc\u05d8\u05dc\u05d2\u05e8\u05dd")))
-            builder.addInstruction(BuilderInstruction21c(Opcode.NEW_INSTANCE, v2,
+            mb.addInstruction(BuilderInstruction21c(Opcode.NEW_INSTANCE, v2,
                 type("Lcom/zovex/injected/Tg_$id;")))
-            builder.addInstruction(BuilderInstruction35c(Opcode.INVOKE_DIRECT, 2, v2, p0, 0, 0, 0,
+            mb.addInstruction(BuilderInstruction35c(Opcode.INVOKE_DIRECT, 2, v2, p0, 0, 0, 0,
                 mref("Lcom/zovex/injected/Tg_$id;", "<init>",
                     listOf("Landroid/content/Context;"), "V")))
-            builder.addInstruction(BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 3, v0, v1, v2, 0, 0,
+            mb.addInstruction(BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 3, v0, v1, v2, 0, 0,
                 mref("Landroidx/appcompat/app/AlertDialog\$Builder;", "setNeutralButton",
                     listOf("Ljava/lang/CharSequence;",
                         "Landroid/content/DialogInterface\$OnClickListener;"),
                     "Landroidx/appcompat/app/AlertDialog\$Builder;")))
-            builder.addInstruction(BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, v0))
+            mb.addInstruction(BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, v0))
         }
 
         // Dismiss button
-        builder.addInstruction(BuilderInstruction21c(Opcode.CONST_STRING, v1,
+        mb.addInstruction(BuilderInstruction21c(Opcode.CONST_STRING, v1,
             str("\u05d0\u05dc \u05ea\u05e6\u05d9\u05d2 \u05e9\u05d5\u05d1")))
-        builder.addInstruction(BuilderInstruction21c(Opcode.NEW_INSTANCE, v2,
+        mb.addInstruction(BuilderInstruction21c(Opcode.NEW_INSTANCE, v2,
             type("Lcom/zovex/injected/Dismiss_$id;")))
-        builder.addInstruction(BuilderInstruction35c(Opcode.INVOKE_DIRECT, 2, v2, p0, 0, 0, 0,
+        mb.addInstruction(BuilderInstruction35c(Opcode.INVOKE_DIRECT, 2, v2, p0, 0, 0, 0,
             mref("Lcom/zovex/injected/Dismiss_$id;", "<init>",
                 listOf("Landroid/content/Context;"), "V")))
-        builder.addInstruction(BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 3, v0, v1, v2, 0, 0,
+        mb.addInstruction(BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 3, v0, v1, v2, 0, 0,
             mref("Landroidx/appcompat/app/AlertDialog\$Builder;", "setNegativeButton",
                 listOf("Ljava/lang/CharSequence;",
                     "Landroid/content/DialogInterface\$OnClickListener;"),
                 "Landroidx/appcompat/app/AlertDialog\$Builder;")))
-        builder.addInstruction(BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, v0))
+        mb.addInstruction(BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, v0))
 
         // setCancelable(false)
-        builder.addInstruction(BuilderInstruction11n(Opcode.CONST_4, v1, 0))
-        builder.addInstruction(BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 2, v0, v1, 0, 0, 0,
+        mb.addInstruction(BuilderInstruction11n(Opcode.CONST_4, v1, 0))
+        mb.addInstruction(BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 2, v0, v1, 0, 0, 0,
             mref("Landroidx/appcompat/app/AlertDialog\$Builder;", "setCancelable",
                 listOf("Z"), "Landroidx/appcompat/app/AlertDialog\$Builder;")))
-        builder.addInstruction(BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, v0))
+        mb.addInstruction(BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, v0))
 
         // show()
-        builder.addInstruction(BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 1, v0, 0, 0, 0, 0,
+        mb.addInstruction(BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 1, v0, 0, 0, 0, 0,
             mref("Landroidx/appcompat/app/AlertDialog\$Builder;", "show",
                 emptyList(), "Landroidx/appcompat/app/AlertDialog;")))
 
-        // end label — כאן ה-if-nez קופץ
-        builder.addLabel("dialog_end_$id")
-        builder.addInstruction(BuilderInstruction10x(Opcode.NOP))
+        // end label point — כאן ה-if-nez מגיע
+        mb.addLabel("end_$id")
+        mb.addInstruction(BuilderInstruction10x(Opcode.NOP))
 
-        // החזר את ה-instructions
-        return builder.methodImplementation.instructions.toList()
+        return mb.methodImplementation.instructions.toList()
     }
 
     // ── Build helper classes ───────────────────────────────────
@@ -309,8 +309,7 @@ class DexPatcher {
             ImmutableMethodReference(cls, name, params, ret)
 
         val init = ImmutableMethod(type, "<init>", null, "V",
-            AccessFlags.PUBLIC.value or AccessFlags.CONSTRUCTOR.value,
-            null, null,
+            AccessFlags.PUBLIC.value or AccessFlags.CONSTRUCTOR.value, null, null,
             ImmutableMethodImplementation(1, listOf(
                 BuilderInstruction35c(Opcode.INVOKE_DIRECT, 1, 0, 0, 0, 0, 0,
                     mref("Ljava/lang/Object;", "<init>", emptyList(), "V")),
@@ -330,8 +329,7 @@ class DexPatcher {
         return ImmutableClassDef(type, AccessFlags.PUBLIC.value,
             "Ljava/lang/Object;",
             listOf("Landroid/content/DialogInterface\$OnClickListener;"),
-            null, null,
-            emptyList<ImmutableField>(),
+            null, null, emptyList<ImmutableField>(),
             listOf(init, onClick))
     }
 
@@ -345,8 +343,7 @@ class DexPatcher {
 
         val init = ImmutableMethod(type, "<init>",
             listOf(ImmutableMethodParameter("Landroid/content/Context;", null, null)),
-            "V", AccessFlags.PUBLIC.value or AccessFlags.CONSTRUCTOR.value,
-            null, null,
+            "V", AccessFlags.PUBLIC.value or AccessFlags.CONSTRUCTOR.value, null, null,
             ImmutableMethodImplementation(2, listOf(
                 BuilderInstruction35c(Opcode.INVOKE_DIRECT, 1, 0, 0, 0, 0, 0,
                     mref("Ljava/lang/Object;", "<init>", emptyList(), "V")),
@@ -391,8 +388,7 @@ class DexPatcher {
         return ImmutableClassDef(type, AccessFlags.PUBLIC.value,
             "Ljava/lang/Object;",
             listOf("Landroid/content/DialogInterface\$OnClickListener;"),
-            null, null,
-            listOf(ctxField),
+            null, null, listOf(ctxField),
             listOf(init, onClick))
     }
 
@@ -406,8 +402,7 @@ class DexPatcher {
 
         val init = ImmutableMethod(type, "<init>",
             listOf(ImmutableMethodParameter("Landroid/content/Context;", null, null)),
-            "V", AccessFlags.PUBLIC.value or AccessFlags.CONSTRUCTOR.value,
-            null, null,
+            "V", AccessFlags.PUBLIC.value or AccessFlags.CONSTRUCTOR.value, null, null,
             ImmutableMethodImplementation(2, listOf(
                 BuilderInstruction35c(Opcode.INVOKE_DIRECT, 1, 0, 0, 0, 0, 0,
                     mref("Ljava/lang/Object;", "<init>", emptyList(), "V")),
@@ -444,8 +439,7 @@ class DexPatcher {
         return ImmutableClassDef(type, AccessFlags.PUBLIC.value,
             "Ljava/lang/Object;",
             listOf("Landroid/content/DialogInterface\$OnClickListener;"),
-            null, null,
-            listOf(ctxField),
+            null, null, listOf(ctxField),
             listOf(init, onClick))
     }
 
