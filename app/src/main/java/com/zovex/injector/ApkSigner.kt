@@ -84,26 +84,24 @@ class ApkSigner(private val context: Context) {
         fun i1(v: Int) = byteArrayOf(0x02, 0x01, v.toByte())
         fun oct(b: ByteArray) = w(0x04, b)
         fun ctx(t: Int, b: ByteArray) = w(0xA0 or t, b)
-        val nil    = byteArrayOf(0x05, 0x00)
-        val sha    = oid(0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x01)
-        val rsa    = oid(0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x01,0x01)
-        val d7     = oid(0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x07,0x01)
-        val sd     = oid(0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x07,0x02)
-        val sn     = cert.serialNumber.toByteArray().let { byteArrayOf(0x02) + len(it.size) + it }
-        val si     = seq(i1(1), seq(cert.issuerX500Principal.encoded, sn),
-                        seq(sha, nil), seq(rsa, nil), oct(sig))
-        val inner  = seq(i1(1), set(seq(sha, nil)), seq(d7), ctx(0, cd), set(si))
+        val nil = byteArrayOf(0x05, 0x00)
+        val sha = oid(0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x01)
+        val rsa = oid(0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x01,0x01)
+        val d7  = oid(0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x07,0x01)
+        val sd  = oid(0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x07,0x02)
+        val sn  = cert.serialNumber.toByteArray().let { byteArrayOf(0x02) + len(it.size) + it }
+        val si  = seq(i1(1), seq(cert.issuerX500Principal.encoded, sn),
+                      seq(sha, nil), seq(rsa, nil), oct(sig))
+        val inner = seq(i1(1), set(seq(sha, nil)), seq(d7), ctx(0, cd), set(si))
         return seq(sd, ctx(0, inner))
     }
 
     private fun ensureKeystore() {
         val f = File(context.filesDir, KS_FILE)
         if (f.exists()) return
-
-        val kpg = KeyPairGenerator.getInstance("RSA").also { it.initialize(2048, SecureRandom()) }
-        val kp  = kpg.generateKeyPair()
+        val kpg  = KeyPairGenerator.getInstance("RSA").also { it.initialize(2048, SecureRandom()) }
+        val kp   = kpg.generateKeyPair()
         val cert = generateCert(kp)
-
         KeyStore.getInstance("PKCS12").also {
             it.load(null, null)
             it.setKeyEntry(KS_ALIAS, kp.private, KS_PASS.toCharArray(), arrayOf(cert))
@@ -112,53 +110,106 @@ class ApkSigner(private val context: Context) {
     }
 
     private fun generateCert(kp: KeyPair): X509Certificate {
-        // ניסיון 1: BouncyCastle (קיים באנדרואיד)
-        return try {
-            generateViaBC(kp)
-        } catch (e1: Exception) {
-            // ניסיון 2: sun.security.x509
-            try {
-                generateViaSun(kp)
-            } catch (e2: Exception) {
-                throw RuntimeException("לא ניתן ליצור certificate: ${e1.message} / ${e2.message}")
-            }
-        }
+        // נסה כל שיטה בתור
+        val errors = mutableListOf<String>()
+        
+        // שיטה 1: Android KeyPairGenerator עם self-signed via raw DER
+        try { return generateSelfSignedRaw(kp) }
+        catch (e: Exception) { errors += "raw: ${e.message}" }
+        
+        // שיטה 2: sun.security.x509
+        try { return generateViaSun(kp) }
+        catch (e: Exception) { errors += "sun: ${e.message}" }
+
+        // שיטה 3: BouncyCastle
+        try { return generateViaBC(kp) }
+        catch (e: Exception) { errors += "bc: ${e.message}" }
+
+        throw RuntimeException("כל שיטות ה-certificate נכשלו: $errors")
     }
 
-    private fun generateViaBC(kp: KeyPair): X509Certificate {
-        val bc  = "org.bouncycastle"
-        val gen = Class.forName("$bc.x509.X509V3CertificateGenerator").newInstance()
-        val g   = gen.javaClass
-        val x500 = Class.forName("$bc.asn1.x500.X500Name")
-            .getConstructor(String::class.java)
-            .newInstance("CN=ZovexInjector, O=Zovex, C=IL")
-        val now = java.util.Date()
-        val exp = java.util.Date(now.time + 3650L * 86400_000L)
-        g.getMethod("setSerialNumber", BigInteger::class.java)
-            .invoke(gen, BigInteger(64, SecureRandom()))
-        for (m in listOf("setIssuerDN", "setSubjectDN"))
-            g.getMethod(m, Class.forName("$bc.asn1.x500.X500Name")).invoke(gen, x500)
-        g.getMethod("setNotBefore", java.util.Date::class.java).invoke(gen, now)
-        g.getMethod("setNotAfter",  java.util.Date::class.java).invoke(gen, exp)
-        g.getMethod("setPublicKey", PublicKey::class.java).invoke(gen, kp.public)
-        g.getMethod("setSignatureAlgorithm", String::class.java)
-            .invoke(gen, "SHA256WithRSAEncryption")
-        return g.getMethod("generate", PrivateKey::class.java)
-            .invoke(gen, kp.private) as X509Certificate
+    /**
+     * יוצר self-signed X509 certificate ידנית ב-DER
+     * ללא תלות בספריות חיצוניות
+     */
+    private fun generateSelfSignedRaw(kp: KeyPair): X509Certificate {
+        val now   = System.currentTimeMillis()
+        val after = now + 3650L * 86400_000L
+
+        fun len(n: Int) = when {
+            n < 0x80  -> byteArrayOf(n.toByte())
+            n < 0x100 -> byteArrayOf(0x81.toByte(), n.toByte())
+            else      -> byteArrayOf(0x82.toByte(), (n ushr 8).toByte(), (n and 0xFF).toByte())
+        }
+        fun w(t: Int, d: ByteArray)  = byteArrayOf(t.toByte()) + len(d.size) + d
+        fun seq(vararg p: ByteArray) = w(0x30, p.reduce { a, b -> a + b })
+        fun oid(vararg v: Int)       = w(0x06, v.map { it.toByte() }.toByteArray())
+        fun ctx(t: Int, b: ByteArray)= w(0xA0 or t, b)
+        fun utf8(s: String)          = w(0x0C, s.toByteArray())
+        fun bigInt(b: ByteArray)     = w(0x02, if (b[0] < 0) byteArrayOf(0) + b else b)
+
+        fun utcTime(ms: Long): ByteArray {
+            val sdf = java.text.SimpleDateFormat("yyMMddHHmmss'Z'", java.util.Locale.US)
+            sdf.timeZone = java.util.TimeZone.getTimeZone("UTC")
+            return w(0x17, sdf.format(java.util.Date(ms)).toByteArray())
+        }
+
+        val sha256rsa = oid(0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x01,0x0B)
+        val nil       = byteArrayOf(0x05, 0x00)
+        val sigAlg    = seq(sha256rsa, nil)
+
+        // Name: CN=ZovexInjector
+        val cnOid  = oid(0x55, 0x04, 0x03)
+        val cnVal  = utf8("ZovexInjector")
+        val name   = seq(w(0x31, seq(seq(cnOid, cnVal))))
+
+        // Serial
+        val serial = bigInt(BigInteger(64, SecureRandom()).toByteArray())
+
+        // Validity
+        val validity = seq(utcTime(now - 1000L), utcTime(after))
+
+        // SubjectPublicKeyInfo — ישירות מה-encoded key
+        val spki = kp.public.encoded
+
+        // TBSCertificate
+        val tbs = seq(
+            ctx(0, w(0x02, byteArrayOf(0x02))), // version v3
+            w(0x02, serial),                      // serialNumber
+            sigAlg,                               // signature algorithm
+            name,                                 // issuer
+            validity,                             // validity
+            name,                                 // subject
+            spki                                  // subjectPublicKeyInfo
+        )
+
+        // Sign TBS
+        val sig = Signature.getInstance("SHA256withRSA").also {
+            it.initSign(kp.private); it.update(tbs)
+        }.sign()
+
+        // BitString for signature
+        val sigBits = w(0x03, byteArrayOf(0x00) + sig)
+
+        // Full Certificate DER
+        val certDer = seq(tbs, sigAlg, sigBits)
+
+        // Parse
+        val cf = java.security.cert.CertificateFactory.getInstance("X.509")
+        return cf.generateCertificate(certDer.inputStream()) as X509Certificate
     }
 
     private fun generateViaSun(kp: KeyPair): X509Certificate {
-        val ci  = Class.forName("sun.security.x509.X509CertInfo").newInstance()
-        val c   = ci.javaClass
-        val now = System.currentTimeMillis()
         fun cls(s: String) = Class.forName(s)
-        val v = cls("sun.security.x509.CertificateValidity")
+        val now = System.currentTimeMillis()
+        val ci  = cls("sun.security.x509.X509CertInfo").newInstance()
+        val c   = ci.javaClass
+        val v   = cls("sun.security.x509.CertificateValidity")
             .getConstructor(java.util.Date::class.java, java.util.Date::class.java)
             .newInstance(java.util.Date(now), java.util.Date(now + 3650L * 86400_000L))
-        val n = cls("sun.security.x509.X500Name")
-            .getConstructor(String::class.java)
-            .newInstance("CN=ZovexInjector, O=Zovex, C=IL")
-        val a = cls("sun.security.x509.AlgorithmId")
+        val n   = cls("sun.security.x509.X500Name")
+            .getConstructor(String::class.java).newInstance("CN=ZovexInjector,O=Zovex,C=IL")
+        val a   = cls("sun.security.x509.AlgorithmId")
             .getMethod("get", String::class.java).invoke(null, "SHA256withRSA")
         val set = c.getMethod("set", String::class.java, Any::class.java)
         set.invoke(ci, "validity", v)
@@ -186,5 +237,27 @@ class ApkSigner(private val context: Context) {
         cert.javaClass.getMethod("sign", PrivateKey::class.java, String::class.java)
             .invoke(cert, kp.private, "SHA256withRSA")
         return cert as X509Certificate
+    }
+
+    private fun generateViaBC(kp: KeyPair): X509Certificate {
+        val bc   = "org.bouncycastle"
+        val gen  = Class.forName("$bc.x509.X509V3CertificateGenerator").newInstance()
+        val g    = gen.javaClass
+        val x500 = Class.forName("$bc.asn1.x500.X500Name")
+            .getConstructor(String::class.java)
+            .newInstance("CN=ZovexInjector,O=Zovex,C=IL")
+        val now  = java.util.Date()
+        val exp  = java.util.Date(now.time + 3650L * 86400_000L)
+        g.getMethod("setSerialNumber", BigInteger::class.java)
+            .invoke(gen, BigInteger(64, SecureRandom()))
+        for (m in listOf("setIssuerDN", "setSubjectDN"))
+            g.getMethod(m, Class.forName("$bc.asn1.x500.X500Name")).invoke(gen, x500)
+        g.getMethod("setNotBefore", java.util.Date::class.java).invoke(gen, now)
+        g.getMethod("setNotAfter",  java.util.Date::class.java).invoke(gen, exp)
+        g.getMethod("setPublicKey", PublicKey::class.java).invoke(gen, kp.public)
+        g.getMethod("setSignatureAlgorithm", String::class.java)
+            .invoke(gen, "SHA256WithRSAEncryption")
+        return g.getMethod("generate", PrivateKey::class.java)
+            .invoke(gen, kp.private) as X509Certificate
     }
                               }
