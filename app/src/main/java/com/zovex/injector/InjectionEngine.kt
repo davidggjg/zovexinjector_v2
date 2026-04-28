@@ -3,9 +3,9 @@ package com.zovex.injector
 import android.content.Context
 import android.util.Log
 import com.android.tools.smali.dexlib2.DexFileFactory
+import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.Opcodes
 import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
-import com.android.tools.smali.dexlib2.Opcode
 import java.io.File
 import java.io.IOException
 import java.util.zip.ZipEntry
@@ -56,7 +56,6 @@ class InjectionEngine(private val context: Context) {
             val patchCfg = DexPatcher.Config(cfg.title, cfg.description,
                 cfg.okText, cfg.telegramUrl, cfg.prefKey)
 
-            // הזרק לקובץ DEX שמכיל את ה-Activity
             var injected = false
             for (dex in dexFiles) {
                 try {
@@ -78,7 +77,8 @@ class InjectionEngine(private val context: Context) {
             }
 
             if (!injected) throw IOException(
-                "לא הצלחתי למצוא את ה-Activity ב-DEX\nAPK מוגן מדי.")
+                "לא הצלחתי למצוא את ה-Activity ב-DEX\n" +
+                "APK מוגן מדי — נסה APK אחר.")
 
             step("📦 אורז APK...")
             val unsigned = File(work, "unsigned.apk")
@@ -90,7 +90,7 @@ class InjectionEngine(private val context: Context) {
 
             step("✅ מאמת (5 פעמים)...")
             repeat(5) { i -> log("אימות ${i+1}/5..."); verifyApk(signed) }
-            log("כל האימותים עברו ✅")
+            log("✅")
 
             val out = outputApk("patched")
             signed.copyTo(out, overwrite = true)
@@ -182,7 +182,8 @@ class InjectionEngine(private val context: Context) {
             ?: throw IOException("AndroidManifest.xml לא נמצא.")
         val root = File(apkDir, "AndroidManifest.xml")
         if (manifest.absolutePath != root.absolutePath) manifest.copyTo(root, overwrite = true)
-        val dexFiles = apkDir.listFiles { f -> f.name.matches(Regex("classes\\d*\\.dex")) } ?: emptyArray()
+        val dexFiles = apkDir.listFiles { f -> f.name.matches(Regex("classes\\d*\\.dex")) }
+            ?: emptyArray()
         if (dexFiles.isEmpty()) throw IOException("אין DEX — APK מוגן?")
         log("✅ ${dexFiles.size} DEX")
     }
@@ -192,7 +193,8 @@ class InjectionEngine(private val context: Context) {
             val e = zip.entries().asSequence().map { it.name }.toSet()
             if (!e.any { it.matches(Regex("classes\\d*\\.dex")) }) throw IOException("חסר DEX")
             if ("AndroidManifest.xml" !in e) throw IOException("חסר Manifest")
-            if (!e.any { it.startsWith("META-INF/") && it.endsWith(".RSA") }) throw IOException("חסרה חתימה")
+            if (!e.any { it.startsWith("META-INF/") && it.endsWith(".RSA") })
+                throw IOException("חסרה חתימה")
         }
     }
 
@@ -209,7 +211,7 @@ class InjectionEngine(private val context: Context) {
     }
 
     private fun findLauncher(apkDir: File): String {
-        val mf = File(apkDir, "AndroidManifest.xml")
+        val mf    = File(apkDir, "AndroidManifest.xml")
         val bytes = mf.readBytes()
         return try {
             if (bytes[0] == '<'.code.toByte()) parseText(mf.readText()) else parseBinary(bytes)
@@ -247,7 +249,8 @@ class InjectionEngine(private val context: Context) {
                     for (c in 0 until len) {
                         val cp = p + 2 + c * 2
                         if (cp + 1 < data.size) {
-                            val ch = ((data[cp].toInt() and 0xFF) or ((data[cp+1].toInt() and 0xFF) shl 8)).toChar()
+                            val ch = ((data[cp].toInt() and 0xFF) or
+                                     ((data[cp+1].toInt() and 0xFF) shl 8)).toChar()
                             if (ch != '\u0000') sb.append(ch)
                         }
                     }
@@ -266,21 +269,99 @@ class InjectionEngine(private val context: Context) {
             ?: throw IOException("לא ניתן לפרסר Manifest")
     }
 
+    /**
+     * מחפש Activity בכל DEX — תומך ב-obfuscated classes
+     * מחפש class שמכיל onCreate AND (extends Activity OR מכיל setContentView)
+     */
     private fun findLauncherFromDex(apkDir: File): String {
-        apkDir.listFiles { f -> f.name.matches(Regex("classes\\d*\\.dex")) }
-            ?.sortedBy { it.name }?.forEach { dex ->
-                try {
-                    DexFileFactory.loadDexFile(dex, Opcodes.getDefault()).classes.forEach { cls ->
-                        val name = cls.type.replace('/', '.').trimStart('L').trimEnd(';')
+        val dexFiles = apkDir.listFiles { f -> f.name.matches(Regex("classes\\d*\\.dex")) }
+            ?.sortedBy { it.name } ?: emptyList()
+
+        // סריקה 1: חפש class שמרחיב Activity ויש לו onCreate
+        for (dex in dexFiles) {
+            try {
+                val dexFile = DexFileFactory.loadDexFile(dex, Opcodes.getDefault())
+                // בנה מפה של כל הclasses
+                val classMap = dexFile.classes.associateBy { it.type }
+
+                for (cls in dexFile.classes) {
+                    if (isActivitySubclass(cls.type, classMap)) {
                         val hasOnCreate = cls.methods.any { it.name == "onCreate" }
-                        val superType = cls.superclass ?: ""
-                        if (hasOnCreate && (superType.contains("Activity") || superType.contains("AppCompat"))) {
-                            log("מצא: $name"); return name
+                        if (hasOnCreate) {
+                            val name = cls.type.replace('/', '.').trimStart('L').trimEnd(';')
+                            log("מצא (Activity subclass): $name")
+                            return name
                         }
                     }
-                } catch (_: Exception) {}
-            }
-        throw IOException("לא ניתן למצוא Activity")
+                }
+            } catch (e: Exception) { log("⚠️ ${dex.name}: ${e.message}") }
+        }
+
+        // סריקה 2: fallback — חפש class עם onCreate + setContentView (גם obfuscated)
+        for (dex in dexFiles) {
+            try {
+                val dexFile = DexFileFactory.loadDexFile(dex, Opcodes.getDefault())
+                for (cls in dexFile.classes) {
+                    val hasOnCreate = cls.methods.any { m -> m.name == "onCreate" }
+                    val hasSetContentView = cls.methods.any { m ->
+                        m.implementation?.instructions?.any { instr ->
+                            instr.opcode == Opcode.INVOKE_VIRTUAL &&
+                            (instr as? ReferenceInstruction)?.reference?.toString()
+                                ?.contains("setContentView") == true
+                        } == true
+                    }
+                    if (hasOnCreate && hasSetContentView) {
+                        val name = cls.type.replace('/', '.').trimStart('L').trimEnd(';')
+                        log("מצא (onCreate+setContentView): $name")
+                        return name
+                    }
+                }
+            } catch (e: Exception) { log("⚠️ ${dex.name}: ${e.message}") }
+        }
+
+        // סריקה 3: כל class עם onCreate בלבד (last resort)
+        for (dex in dexFiles) {
+            try {
+                val dexFile = DexFileFactory.loadDexFile(dex, Opcodes.getDefault())
+                for (cls in dexFile.classes) {
+                    val hasOnCreate = cls.methods.any { m ->
+                        m.name == "onCreate" &&
+                        m.parameterTypes.firstOrNull() == "Landroid/os/Bundle;"
+                    }
+                    if (hasOnCreate) {
+                        val superType = cls.superclass ?: ""
+                        if (superType.contains("Activity") || superType.contains("Fragment")) {
+                            val name = cls.type.replace('/', '.').trimStart('L').trimEnd(';')
+                            log("מצא (last resort): $name")
+                            return name
+                        }
+                    }
+                }
+            } catch (e: Exception) { log("⚠️ ${dex.name}: ${e.message}") }
+        }
+
+        throw IOException(
+            "לא ניתן למצוא Activity ב-APK זה.\n" +
+            "ה-APK מוגן מדי — נסה APK אחר."
+        )
+    }
+
+    private fun isActivitySubclass(
+        type: String?,
+        classMap: Map<String, com.android.tools.smali.dexlib2.iface.ClassDef>,
+        depth: Int = 0
+    ): Boolean {
+        if (type == null || depth > 20) return false
+        val activityTypes = setOf(
+            "Landroid/app/Activity;",
+            "Landroidx/appcompat/app/AppCompatActivity;",
+            "Landroid/support/v7/app/AppCompatActivity;",
+            "Landroidx/fragment/app/FragmentActivity;",
+            "Landroid/support/v4/app/FragmentActivity;"
+        )
+        if (type in activityTypes) return true
+        val cls = classMap[type] ?: return false
+        return isActivitySubclass(cls.superclass, classMap, depth + 1)
     }
 
     private fun repack(apkDir: File, out: File) {
@@ -297,7 +378,10 @@ class InjectionEngine(private val context: Context) {
         log("repacked: ${out.length() / 1024} KB")
     }
 
-    private fun workDir() = File(context.cacheDir, "zovex_${System.currentTimeMillis()}").also { it.mkdirs() }
-    private fun outputApk(p: String) = File(File(context.filesDir, "output").also { it.mkdirs() },
-        "${p}_${System.currentTimeMillis()}.apk")
+    private fun workDir() =
+        File(context.cacheDir, "zovex_${System.currentTimeMillis()}").also { it.mkdirs() }
+
+    private fun outputApk(p: String) =
+        File(File(context.filesDir, "output").also { it.mkdirs() },
+            "${p}_${System.currentTimeMillis()}.apk")
                               }
