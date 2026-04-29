@@ -32,7 +32,6 @@ class InjectionEngine(private val context: Context) {
     private val signer  by lazy { ApkSigner(context) }
     private val patcher by lazy { DexPatcher() }
 
-    // activityClass = null → מחפש אוטומטית
     fun inject(inputApkPath: String, cfg: Config, activityClass: String? = null): String {
         val work = workDir()
         try {
@@ -80,7 +79,7 @@ class InjectionEngine(private val context: Context) {
             if (!injected) throw IOException(
                 "לא הצלחתי למצוא את ה-Activity ב-DEX\n" +
                 "Activity: $launcher\n" +
-                "APK מוגן מדי — נסה APK אחר.")
+                "נסה להכניס את שם ה-Activity ידנית.")
 
             step("📦 אורז APK...")
             val unsigned = File(work, "unsigned.apk")
@@ -90,9 +89,8 @@ class InjectionEngine(private val context: Context) {
             val signed = File(work, "signed.apk")
             signer.sign(unsigned, signed)
 
-            step("✅ מאמת (5 פעמים)...")
-            repeat(5) { i -> log("אימות ${i+1}/5..."); verifyApk(signed) }
-            log("✅")
+            step("✅ מאמת...")
+            verifyApk(signed)
 
             val out = outputApk("patched")
             signed.copyTo(out, overwrite = true)
@@ -154,8 +152,8 @@ class InjectionEngine(private val context: Context) {
             val signed = File(work, "signed.apk")
             signer.sign(unsigned, signed)
 
-            step("✅ מאמת (5 פעמים)...")
-            repeat(5) { i -> log("אימות ${i+1}/5..."); verifyApk(signed) }
+            step("✅ מאמת...")
+            verifyApk(signed)
 
             val out = outputApk("no_dialogs")
             signed.copyTo(out, overwrite = true)
@@ -171,7 +169,7 @@ class InjectionEngine(private val context: Context) {
         if (f.length() < 1024) throw IOException("הקובץ קטן מדי")
         val magic = ByteArray(4); f.inputStream().use { it.read(magic) }
         if (magic[0] != 0x50.toByte() || magic[1] != 0x4B.toByte())
-            throw IOException("הקובץ אינו APK תקין.\nאם זה XAPK — חלץ את ה-APK הפנימי קודם.")
+            throw IOException("הקובץ אינו APK תקין.")
         try {
             ZipFile(path).use { zip ->
                 if (zip.entries().asSequence().count() == 0) throw IOException("APK ריק")
@@ -275,22 +273,37 @@ class InjectionEngine(private val context: Context) {
         val dexFiles = apkDir.listFiles { f -> f.name.matches(Regex("classes\\d*\\.dex")) }
             ?.sortedBy { it.name } ?: emptyList()
 
+        val knownActivitySupers = setOf(
+            "Landroid/app/Activity;",
+            "Landroidx/appcompat/app/AppCompatActivity;",
+            "Landroid/support/v7/app/AppCompatActivity;",
+            "Landroidx/fragment/app/FragmentActivity;",
+            "Landroid/support/v4/app/FragmentActivity;",
+            "Landroidx/activity/ComponentActivity;"
+        )
+
+        // סריקה 1: super ישיר מ-Activity או מחלקות ידועות
         for (dex in dexFiles) {
             try {
                 val dexFile = DexFileFactory.loadDexFile(dex, Opcodes.getDefault())
                 val classMap = dexFile.classes.associateBy { it.type }
                 for (cls in dexFile.classes) {
-                    if (isActivitySubclass(cls.type, classMap)) {
-                        val hasOnCreate = cls.methods.any { it.name == "onCreate" }
-                        if (hasOnCreate) {
-                            val name = cls.type.replace('/', '.').trimStart('L').trimEnd(';')
-                            log("מצא: $name"); return name
-                        }
+                    val superType = cls.superclass ?: continue
+                    val hasOnCreate = cls.methods.any { it.name == "onCreate" }
+                    if (!hasOnCreate) continue
+                    if (superType in knownActivitySupers ||
+                        superType.contains("Activity") ||
+                        superType.contains("AppCompat") ||
+                        isActivitySubclass(cls.type, classMap)) {
+                        val name = cls.type.replace('/', '.').trimStart('L').trimEnd(';')
+                        log("מצא (super): $name ← $superType")
+                        return name
                     }
                 }
             } catch (e: Exception) { log("⚠️ ${dex.name}: ${e.message}") }
         }
 
+        // סריקה 2: onCreate + setContentView
         for (dex in dexFiles) {
             try {
                 val dexFile = DexFileFactory.loadDexFile(dex, Opcodes.getDefault())
@@ -305,7 +318,26 @@ class InjectionEngine(private val context: Context) {
                     }
                     if (hasOnCreate && hasSetContentView) {
                         val name = cls.type.replace('/', '.').trimStart('L').trimEnd(';')
-                        log("מצא (setContentView): $name"); return name
+                        log("מצא (setContentView): $name")
+                        return name
+                    }
+                }
+            } catch (e: Exception) { log("⚠️ ${dex.name}: ${e.message}") }
+        }
+
+        // סריקה 3: כל class עם onCreate(Bundle)
+        for (dex in dexFiles) {
+            try {
+                val dexFile = DexFileFactory.loadDexFile(dex, Opcodes.getDefault())
+                for (cls in dexFile.classes) {
+                    val hasOnCreate = cls.methods.any { m ->
+                        m.name == "onCreate" &&
+                        m.parameterTypes.firstOrNull() == "Landroid/os/Bundle;"
+                    }
+                    if (hasOnCreate) {
+                        val name = cls.type.replace('/', '.').trimStart('L').trimEnd(';')
+                        log("מצא (onCreate): $name")
+                        return name
                     }
                 }
             } catch (e: Exception) { log("⚠️ ${dex.name}: ${e.message}") }
@@ -325,7 +357,8 @@ class InjectionEngine(private val context: Context) {
             "Landroidx/appcompat/app/AppCompatActivity;",
             "Landroid/support/v7/app/AppCompatActivity;",
             "Landroidx/fragment/app/FragmentActivity;",
-            "Landroid/support/v4/app/FragmentActivity;"
+            "Landroid/support/v4/app/FragmentActivity;",
+            "Landroidx/activity/ComponentActivity;"
         )
         if (type in activityTypes) return true
         val cls = classMap[type] ?: return false
