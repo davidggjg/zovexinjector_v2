@@ -32,7 +32,8 @@ class InjectionEngine(private val context: Context) {
     private val signer  by lazy { ApkSigner(context) }
     private val patcher by lazy { DexPatcher() }
 
-    fun inject(inputApkPath: String, cfg: Config): String {
+    // activityClass = null → מחפש אוטומטית
+    fun inject(inputApkPath: String, cfg: Config, activityClass: String? = null): String {
         val work = workDir()
         try {
             step("🔎 בודק APK...")
@@ -46,7 +47,7 @@ class InjectionEngine(private val context: Context) {
             scanAndFix(apkDir)
 
             step("🔍 מאתר Activity...")
-            val launcher = findLauncher(apkDir)
+            val launcher = activityClass ?: findLauncher(apkDir)
             log("Activity: $launcher")
 
             step("✏️ מזריק דיאלוג לתוך DEX...")
@@ -78,6 +79,7 @@ class InjectionEngine(private val context: Context) {
 
             if (!injected) throw IOException(
                 "לא הצלחתי למצוא את ה-Activity ב-DEX\n" +
+                "Activity: $launcher\n" +
                 "APK מוגן מדי — נסה APK אחר.")
 
             step("📦 אורז APK...")
@@ -269,35 +271,26 @@ class InjectionEngine(private val context: Context) {
             ?: throw IOException("לא ניתן לפרסר Manifest")
     }
 
-    /**
-     * מחפש Activity בכל DEX — תומך ב-obfuscated classes
-     * מחפש class שמכיל onCreate AND (extends Activity OR מכיל setContentView)
-     */
     private fun findLauncherFromDex(apkDir: File): String {
         val dexFiles = apkDir.listFiles { f -> f.name.matches(Regex("classes\\d*\\.dex")) }
             ?.sortedBy { it.name } ?: emptyList()
 
-        // סריקה 1: חפש class שמרחיב Activity ויש לו onCreate
         for (dex in dexFiles) {
             try {
                 val dexFile = DexFileFactory.loadDexFile(dex, Opcodes.getDefault())
-                // בנה מפה של כל הclasses
                 val classMap = dexFile.classes.associateBy { it.type }
-
                 for (cls in dexFile.classes) {
                     if (isActivitySubclass(cls.type, classMap)) {
                         val hasOnCreate = cls.methods.any { it.name == "onCreate" }
                         if (hasOnCreate) {
                             val name = cls.type.replace('/', '.').trimStart('L').trimEnd(';')
-                            log("מצא (Activity subclass): $name")
-                            return name
+                            log("מצא: $name"); return name
                         }
                     }
                 }
             } catch (e: Exception) { log("⚠️ ${dex.name}: ${e.message}") }
         }
 
-        // סריקה 2: fallback — חפש class עם onCreate + setContentView (גם obfuscated)
         for (dex in dexFiles) {
             try {
                 val dexFile = DexFileFactory.loadDexFile(dex, Opcodes.getDefault())
@@ -312,38 +305,13 @@ class InjectionEngine(private val context: Context) {
                     }
                     if (hasOnCreate && hasSetContentView) {
                         val name = cls.type.replace('/', '.').trimStart('L').trimEnd(';')
-                        log("מצא (onCreate+setContentView): $name")
-                        return name
+                        log("מצא (setContentView): $name"); return name
                     }
                 }
             } catch (e: Exception) { log("⚠️ ${dex.name}: ${e.message}") }
         }
 
-        // סריקה 3: כל class עם onCreate בלבד (last resort)
-        for (dex in dexFiles) {
-            try {
-                val dexFile = DexFileFactory.loadDexFile(dex, Opcodes.getDefault())
-                for (cls in dexFile.classes) {
-                    val hasOnCreate = cls.methods.any { m ->
-                        m.name == "onCreate" &&
-                        m.parameterTypes.firstOrNull() == "Landroid/os/Bundle;"
-                    }
-                    if (hasOnCreate) {
-                        val superType = cls.superclass ?: ""
-                        if (superType.contains("Activity") || superType.contains("Fragment")) {
-                            val name = cls.type.replace('/', '.').trimStart('L').trimEnd(';')
-                            log("מצא (last resort): $name")
-                            return name
-                        }
-                    }
-                }
-            } catch (e: Exception) { log("⚠️ ${dex.name}: ${e.message}") }
-        }
-
-        throw IOException(
-            "לא ניתן למצוא Activity ב-APK זה.\n" +
-            "ה-APK מוגן מדי — נסה APK אחר."
-        )
+        throw IOException("לא ניתן למצוא Activity אוטומטית")
     }
 
     private fun isActivitySubclass(
