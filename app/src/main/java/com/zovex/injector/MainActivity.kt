@@ -2,6 +2,7 @@ package com.zovex.injector
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -11,12 +12,15 @@ import android.os.Environment
 import android.provider.OpenableColumns
 import android.provider.Settings
 import android.view.View
+import android.widget.EditText
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.lifecycle.lifecycleScope
+import com.android.tools.smali.dexlib2.DexFileFactory
+import com.android.tools.smali.dexlib2.Opcodes
 import com.zovex.injector.databinding.ActivityMainBinding
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -42,8 +46,8 @@ class MainActivity : AppCompatActivity() {
         b.etOkText.setText("אישור")
         b.etPrefKey.setText("my_dialog_v1")
         b.btnPickApk.setOnClickListener { checkPermsThenPick() }
-        b.btnInject.setOnClickListener { run(false) }
-        b.btnDeleteDialogs.setOnClickListener { run(true) }
+        b.btnInject.setOnClickListener { startInject() }
+        b.btnDeleteDialogs.setOnClickListener { run(true, null) }
         b.btnInstall.setOnClickListener { install() }
         b.btnShare.setOnClickListener { share() }
     }
@@ -120,16 +124,165 @@ class MainActivity : AppCompatActivity() {
             c.moveToFirst(); if (i >= 0) c.getString(i) else null
         }
 
-    private fun run(delete: Boolean) {
+    /**
+     * מנסה למצוא Activity אוטומטית — אם נכשל שואל את המשתמש
+     */
+    private fun startInject() {
         val apk = selectedApkPath ?: return toast("קודם בחר קובץ APK")
-        if (!delete) {
-            if (b.etTitle.text.isNullOrBlank()) return toast("הכנס כותרת")
-            if (b.etDescription.text.isNullOrBlank()) return toast("הכנס הודעה")
-        }
+        if (b.etTitle.text.isNullOrBlank()) return toast("הכנס כותרת")
+        if (b.etDescription.text.isNullOrBlank()) return toast("הכנס הודעה")
+
         hideAll()
         b.sectionProgress.visibility = View.VISIBLE
         b.tvLog.text = ""
         setButtons(false)
+
+        engine.onStep = { m -> runOnUiThread { b.tvStep.text = m } }
+        engine.onLog  = { m -> runOnUiThread { b.tvLog.append("$m\n") } }
+
+        lifecycleScope.launch {
+            // נסה למצוא activities
+            val activities = withContext(Dispatchers.IO) {
+                try { scanActivitiesFromApk(apk) } catch (_: Exception) { emptyList() }
+            }
+
+            when {
+                activities.isEmpty() -> {
+                    // לא נמצא כלום — שאל ידנית
+                    showManualActivityDialog(apk)
+                }
+                activities.size == 1 -> {
+                    // נמצא בדיוק אחד — השתמש בו
+                    run(false, activities[0])
+                }
+                else -> {
+                    // נמצאו כמה — תן לבחור
+                    showActivityPicker(apk, activities)
+                }
+            }
+        }
+    }
+
+    /**
+     * סורק את כל ה-Activities מה-APK
+     */
+    private fun scanActivitiesFromApk(apkPath: String): List<String> {
+        val result = mutableListOf<String>()
+        val tempDir = File(cacheDir, "scan_${System.currentTimeMillis()}").also { it.mkdirs() }
+
+        try {
+            // unzip DEX files only
+            java.util.zip.ZipFile(apkPath).use { zip ->
+                zip.entries().asSequence()
+                    .filter { it.name.matches(Regex("classes\\d*\\.dex")) }
+                    .forEach { e ->
+                        val f = File(tempDir, e.name)
+                        zip.getInputStream(e).use { src -> f.outputStream().use { src.copyTo(it) } }
+                    }
+            }
+
+            val dexFiles = tempDir.listFiles { f -> f.name.matches(Regex("classes\\d*\\.dex")) }
+                ?.sortedBy { it.name } ?: emptyList()
+
+            for (dex in dexFiles) {
+                try {
+                    val dexFile = DexFileFactory.loadDexFile(dex, Opcodes.getDefault())
+                    val classMap = dexFile.classes.associateBy { it.type }
+
+                    for (cls in dexFile.classes) {
+                        val hasOnCreate = cls.methods.any { m ->
+                            m.name == "onCreate" &&
+                            m.parameterTypes.firstOrNull() == "Landroid/os/Bundle;"
+                        }
+                        if (!hasOnCreate) continue
+
+                        val superType = cls.superclass ?: ""
+                        val isActivity = superType.contains("Activity") ||
+                            isActivitySubclassCheck(cls.type, classMap)
+
+                        if (isActivity) {
+                            val name = cls.type.replace('/', '.').trimStart('L').trimEnd(';')
+                            if (name !in result) result.add(name)
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+        } finally {
+            tempDir.deleteRecursively()
+        }
+
+        return result
+    }
+
+    private fun isActivitySubclassCheck(
+        type: String?,
+        classMap: Map<String, com.android.tools.smali.dexlib2.iface.ClassDef>,
+        depth: Int = 0
+    ): Boolean {
+        if (type == null || depth > 15) return false
+        val activityTypes = setOf(
+            "Landroid/app/Activity;",
+            "Landroidx/appcompat/app/AppCompatActivity;",
+            "Landroid/support/v7/app/AppCompatActivity;",
+            "Landroidx/fragment/app/FragmentActivity;"
+        )
+        if (type in activityTypes) return true
+        val cls = classMap[type] ?: return false
+        return isActivitySubclassCheck(cls.superclass, classMap, depth + 1)
+    }
+
+    private fun showManualActivityDialog(apkPath: String) {
+        runOnUiThread {
+            b.sectionProgress.visibility = View.GONE
+            setButtons(true)
+
+            val input = EditText(this).apply {
+                hint = "com.example.app.MainActivity"
+                textSize = 13f
+                setPadding(40, 20, 40, 20)
+            }
+
+            AlertDialog.Builder(this)
+                .setTitle("🔍 הכנס שם Activity ידנית")
+                .setMessage("לא הצלחתי לזהות את ה-Activity אוטומטית.\nהכנס את שם ה-class המלא:")
+                .setView(input)
+                .setPositiveButton("הזרק") { _, _ ->
+                    val activityName = input.text.toString().trim()
+                    if (activityName.isBlank()) {
+                        toast("חובה להכניס שם Activity")
+                    } else {
+                        run(false, activityName)
+                    }
+                }
+                .setNegativeButton("ביטול", null)
+                .show()
+        }
+    }
+
+    private fun showActivityPicker(apkPath: String, activities: List<String>) {
+        runOnUiThread {
+            b.sectionProgress.visibility = View.GONE
+            setButtons(true)
+
+            val items = activities.toTypedArray()
+            AlertDialog.Builder(this)
+                .setTitle("בחר Activity להזרקה")
+                .setItems(items) { _, i ->
+                    run(false, activities[i])
+                }
+                .setNegativeButton("ביטול", null)
+                .show()
+        }
+    }
+
+    private fun run(delete: Boolean, activityClass: String?) {
+        val apk = selectedApkPath ?: return toast("קודם בחר קובץ APK")
+
+        hideAll()
+        b.sectionProgress.visibility = View.VISIBLE
+        b.tvLog.text = ""
+        setButtons(false)
+
         engine.onStep = { m -> runOnUiThread { b.tvStep.text = m } }
         engine.onLog  = { m -> runOnUiThread { b.tvLog.append("$m\n") } }
 
@@ -143,7 +296,7 @@ class MainActivity : AppCompatActivity() {
                         okText      = b.etOkText.text?.toString()?.trim()?.ifEmpty { "אישור" } ?: "אישור",
                         telegramUrl = b.etTelegramUrl.text?.toString()?.trim() ?: "",
                         prefKey     = b.etPrefKey.text?.toString()?.trim()?.ifEmpty { "zovex_v1" } ?: "zovex_v1"
-                    ))
+                    ), activityClass)
                 }
             }
             b.sectionProgress.visibility = View.GONE
@@ -207,7 +360,9 @@ class MainActivity : AppCompatActivity() {
         b.sectionProgress.visibility = View.GONE
     }
     private fun setButtons(on: Boolean) {
-        b.btnInject.isEnabled = on; b.btnDeleteDialogs.isEnabled = on; b.btnPickApk.isEnabled = on
+        b.btnInject.isEnabled = on
+        b.btnDeleteDialogs.isEnabled = on
+        b.btnPickApk.isEnabled = on
     }
     private fun toast(m: String) = Toast.makeText(this, m, Toast.LENGTH_SHORT).show()
     private fun fmtSize(b: Long) = when {
