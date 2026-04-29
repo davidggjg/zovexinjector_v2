@@ -78,8 +78,7 @@ class InjectionEngine(private val context: Context) {
 
             if (!injected) throw IOException(
                 "לא הצלחתי למצוא את ה-Activity ב-DEX\n" +
-                "Activity: $launcher\n" +
-                "נסה להכניס את שם ה-Activity ידנית.")
+                "Activity: $launcher\nנסה להכניס ידנית.")
 
             step("📦 אורז APK...")
             val unsigned = File(work, "unsigned.apk")
@@ -282,7 +281,7 @@ class InjectionEngine(private val context: Context) {
             "Landroidx/activity/ComponentActivity;"
         )
 
-        // סריקה 1: super ישיר מ-Activity או מחלקות ידועות
+        // סריקה 1: super ישיר
         for (dex in dexFiles) {
             try {
                 val dexFile = DexFileFactory.loadDexFile(dex, Opcodes.getDefault())
