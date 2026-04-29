@@ -16,10 +16,7 @@ import javax.security.auth.x500.X500Principal
 class ApkSigner(private val context: Context) {
 
     companion object {
-        private const val KS_FILE   = "zovex2.keystore"
-        private const val KS_ALIAS  = "zovex"
-        private const val KS_PASS   = "Zovex_2024"
-        private const val AKS_ALIAS = "ZovexSigningKey"
+        private const val AKS_ALIAS = "ZovexSigningKey2"
     }
 
     fun sign(unsigned: File, out: File) {
@@ -30,6 +27,7 @@ class ApkSigner(private val context: Context) {
             it.initSign(key); it.update(sf)
         }.sign()
         val rsa = buildPkcs7(cert, sig)
+
         ZipOutputStream(out.outputStream().buffered()).use { zos ->
             zos.setLevel(6)
             fun put(n: String, d: ByteArray) {
@@ -48,27 +46,21 @@ class ApkSigner(private val context: Context) {
         }
     }
 
-    /**
-     * מחזיר (PrivateKey, X509Certificate) מ-Android Keystore
-     * יוצר אם לא קיים — Android Keystore מייצר certificate תקין אוטומטית
-     */
     private fun getOrCreateKeyPair(): Pair<PrivateKey, X509Certificate> {
         val aks = KeyStore.getInstance("AndroidKeyStore").also { it.load(null) }
 
-        // נסה לטעון קיים
         if (aks.containsAlias(AKS_ALIAS)) {
             val key  = aks.getKey(AKS_ALIAS, null) as PrivateKey
             val cert = aks.getCertificate(AKS_ALIAS) as X509Certificate
             return Pair(key, cert)
         }
 
-        // צור חדש
         val spec = KeyGenParameterSpec.Builder(
             AKS_ALIAS,
-            KeyProperties.PURPOSE_SIGN
+            KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
         )
             .setKeySize(2048)
-            .setDigests(KeyProperties.DIGEST_SHA256)
+            .setDigests(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_SHA1)
             .setSignaturePaddings(KeyProperties.SIGNATURE_PADDING_RSA_PKCS1)
             .setCertificateSubject(X500Principal("CN=ZovexInjector, O=Zovex, C=IL"))
             .setCertificateSerialNumber(BigInteger.valueOf(System.currentTimeMillis()))
@@ -115,24 +107,54 @@ class ApkSigner(private val context: Context) {
         fun len(n: Int) = when {
             n < 0x80  -> byteArrayOf(n.toByte())
             n < 0x100 -> byteArrayOf(0x81.toByte(), n.toByte())
-            else      -> byteArrayOf(0x82.toByte(), (n ushr 8).toByte(), (n and 0xFF).toByte())
+            n < 0x10000 -> byteArrayOf(0x82.toByte(), (n ushr 8).toByte(), (n and 0xFF).toByte())
+            else -> byteArrayOf(0x83.toByte(), (n ushr 16).toByte(),
+                (n ushr 8 and 0xFF).toByte(), (n and 0xFF).toByte())
         }
         fun w(t: Int, d: ByteArray) = byteArrayOf(t.toByte()) + len(d.size) + d
-        fun seq(vararg p: ByteArray) = w(0x30, p.reduce { a, b -> a + b })
-        fun set(vararg p: ByteArray) = w(0x31, p.reduce { a, b -> a + b })
+        fun seq(vararg p: ByteArray): ByteArray {
+            val body = p.reduce { a, b -> a + b }
+            return w(0x30, body)
+        }
+        fun set(vararg p: ByteArray): ByteArray {
+            val body = p.reduce { a, b -> a + b }
+            return w(0x31, body)
+        }
         fun oid(vararg v: Int) = w(0x06, v.map { it.toByte() }.toByteArray())
         fun i1(v: Int) = byteArrayOf(0x02, 0x01, v.toByte())
         fun oct(b: ByteArray) = w(0x04, b)
         fun ctx(t: Int, b: ByteArray) = w(0xA0 or t, b)
         val nil = byteArrayOf(0x05, 0x00)
-        val sha = oid(0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x01)
-        val rsa = oid(0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x01,0x01)
-        val d7  = oid(0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x07,0x01)
-        val sd  = oid(0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x07,0x02)
-        val sn  = cert.serialNumber.toByteArray().let { byteArrayOf(0x02) + len(it.size) + it }
-        val si  = seq(i1(1), seq(cert.issuerX500Principal.encoded, sn),
-                      seq(sha, nil), seq(rsa, nil), oct(sig))
-        val inner = seq(i1(1), set(seq(sha, nil)), seq(d7), ctx(0, cd), set(si))
-        return seq(sd, ctx(0, inner))
+
+        // OIDs
+        val sha256    = oid(0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x01)
+        val rsaEnc    = oid(0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x01,0x01)
+        val dataOid   = oid(0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x07,0x01)
+        val signedOid = oid(0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x07,0x02)
+
+        // Serial number encoding
+        val serialBytes = cert.serialNumber.toByteArray()
+        val serialFixed = if (serialBytes[0] < 0) byteArrayOf(0x00) + serialBytes else serialBytes
+        val serialDer   = byteArrayOf(0x02) + len(serialFixed.size) + serialFixed
+
+        // SignerInfo
+        val signerInfo = seq(
+            i1(1),
+            seq(cert.issuerX500Principal.encoded, serialDer),
+            seq(sha256, nil),
+            seq(rsaEnc, nil),
+            oct(sig)
+        )
+
+        // SignedData inner
+        val innerData = seq(
+            i1(1),
+            set(seq(sha256, nil)),
+            seq(dataOid),
+            ctx(0, cd),
+            set(signerInfo)
+        )
+
+        return seq(signedOid, ctx(0, innerData))
     }
                               }
