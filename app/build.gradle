@@ -41,6 +41,7 @@ dependencies {
     implementation 'com.google.android.material:material:1.11.0'
     implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
-    // dexlib2 בלבד — ללא smali/baksmali
     implementation 'com.android.tools.smali:smali-dexlib2:3.0.9'
+    // ספרייה של ReVanced לחתימה — עובדת על כל מכשיר
+    implementation 'app.revanced:library-android:4.0.0'
 }
