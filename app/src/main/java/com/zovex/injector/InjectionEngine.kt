@@ -281,7 +281,6 @@ class InjectionEngine(private val context: Context) {
             "Landroidx/activity/ComponentActivity;"
         )
 
-        // סריקה 1: super ישיר
         for (dex in dexFiles) {
             try {
                 val dexFile = DexFileFactory.loadDexFile(dex, Opcodes.getDefault())
@@ -302,7 +301,6 @@ class InjectionEngine(private val context: Context) {
             } catch (e: Exception) { log("⚠️ ${dex.name}: ${e.message}") }
         }
 
-        // סריקה 2: onCreate + setContentView
         for (dex in dexFiles) {
             try {
                 val dexFile = DexFileFactory.loadDexFile(dex, Opcodes.getDefault())
@@ -324,7 +322,6 @@ class InjectionEngine(private val context: Context) {
             } catch (e: Exception) { log("⚠️ ${dex.name}: ${e.message}") }
         }
 
-        // סריקה 3: כל class עם onCreate(Bundle)
         for (dex in dexFiles) {
             try {
                 val dexFile = DexFileFactory.loadDexFile(dex, Opcodes.getDefault())
