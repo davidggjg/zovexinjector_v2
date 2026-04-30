@@ -50,18 +50,16 @@ jobs:
         run: chmod +x gradlew
 
       - name: Build release APK
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./gradlew assembleRelease --no-daemon
 
       - name: Prepare keystore
         run: |
-          if [ -n "${{ secrets.KEYSTORE_BASE64 }}" ]; then
-            echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > signing.keystore
-          else
-            keytool -genkey -v -keystore signing.keystore -alias zovex \
-              -keyalg RSA -keysize 2048 -validity 10000 \
-              -storepass 'Zovex_2024' -keypass 'Zovex_2024' \
-              -dname "CN=ZovexInjector,O=Zovex,C=IL" -noprompt
-          fi
+          keytool -genkey -v -keystore signing.keystore -alias zovex \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass 'Zovex_2024' -keypass 'Zovex_2024' \
+            -dname "CN=ZovexInjector,O=Zovex,C=IL" -noprompt
 
       - name: Sign APK
         run: |
