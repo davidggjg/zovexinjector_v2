@@ -10,6 +10,14 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // ReVanced repository
+        maven { url 'https://maven.pkg.github.com/revanced/revanced-library' 
+            credentials {
+                username = "anonymous"
+                password = ""
+            }
+        }
+        maven { url 'https://jitpack.io' }
     }
 }
 rootProject.name = "ZovexInjector"
