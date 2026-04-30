@@ -10,13 +10,6 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        maven {
-            url 'https://maven.pkg.github.com/revanced/revanced-library'
-            credentials {
-                username = "x-access-token"
-                password = System.getenv("GITHUB_TOKEN") ?: ""
-            }
-        }
     }
 }
 rootProject.name = "ZovexInjector"
