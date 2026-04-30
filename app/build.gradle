@@ -42,5 +42,4 @@ dependencies {
     implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
     implementation 'com.android.tools.smali:smali-dexlib2:3.0.9'
-    implementation 'app.revanced:library-android:4.0.0'
 }
