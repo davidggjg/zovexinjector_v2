@@ -27,10 +27,8 @@ jobs:
       - name: Setup GitHub credentials for ReVanced packages
         run: |
           mkdir -p ~/.gradle
-          cat > ~/.gradle/gradle.properties << EOF
-          githubPackagesUsername=x-access-token
-          githubPackagesPassword=${{ secrets.GITHUB_TOKEN }}
-          EOF
+          echo "githubPackagesUsername=x-access-token" >> ~/.gradle/gradle.properties
+          echo "githubPackagesPassword=${{ secrets.GITHUB_TOKEN }}" >> ~/.gradle/gradle.properties
 
       - name: Create launcher icons
         run: |
