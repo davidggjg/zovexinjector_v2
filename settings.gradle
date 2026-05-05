@@ -13,10 +13,7 @@ dependencyResolutionManagement {
         maven { url 'https://jitpack.io' }
         maven {
             url 'https://maven.pkg.github.com/revanced/registry'
-            credentials {
-                username = System.getenv("githubPackagesUsername") ?: ""
-                password = System.getenv("githubPackagesPassword") ?: ""
-            }
+            credentials(PasswordCredentials)
         }
     }
 }
