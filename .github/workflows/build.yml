@@ -24,6 +24,14 @@ jobs:
             -o gradle/wrapper/gradle-wrapper.jar
           test -s gradle/wrapper/gradle-wrapper.jar || exit 1
 
+      - name: Setup GitHub credentials for ReVanced packages
+        run: |
+          mkdir -p ~/.gradle
+          cat > ~/.gradle/gradle.properties << EOF
+          githubPackagesUsername=x-access-token
+          githubPackagesPassword=${{ secrets.GITHUB_TOKEN }}
+          EOF
+
       - name: Create launcher icons
         run: |
           python3 - << 'EOF'
@@ -50,8 +58,6 @@ jobs:
         run: chmod +x gradlew
 
       - name: Build release APK
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./gradlew assembleRelease --no-daemon
 
       - name: Prepare keystore
