@@ -14,8 +14,8 @@ dependencyResolutionManagement {
         maven {
             url 'https://maven.pkg.github.com/revanced/registry'
             credentials {
-                username = System.getenv("githubPackagesUsername") ?: project.findProperty("githubPackagesUsername") ?: ""
-                password = System.getenv("githubPackagesPassword") ?: project.findProperty("githubPackagesPassword") ?: ""
+                username = System.getenv("githubPackagesUsername") ?: ""
+                password = System.getenv("githubPackagesPassword") ?: ""
             }
         }
     }
