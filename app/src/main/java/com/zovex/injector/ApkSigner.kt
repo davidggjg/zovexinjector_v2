@@ -9,13 +9,15 @@ import java.util.Date
 class ApkSigner(private val context: Context) {
 
     companion object {
-        private const val KS_FILE  = "zovex_v4.keystore"
-        private const val KS_ALIAS = "ZovexKey"
-        private const val KS_PASS  = "ZovexPass"
+        private const val KS_DIR   = "signing"
+        private const val KS_FILE  = "manager.keystore"
+        private const val KS_ALIAS = "ReVanced"
+        private const val KS_PASS  = "ReVanced"
     }
 
     fun sign(unsigned: File, out: File) {
-        val ksFile = File(context.filesDir, KS_FILE)
+        val ksFile = context.getDir(KS_DIR, android.content.Context.MODE_PRIVATE)
+            .resolve(KS_FILE)
         ensureKeystore(ksFile)
         val details = ApkUtils.KeyStoreDetails(
             keyStore         = ksFile,
@@ -28,7 +30,7 @@ class ApkSigner(private val context: Context) {
 
     private fun ensureKeystore(ksFile: File) {
         if (ksFile.exists()) return
-        val expiry = Date(System.currentTimeMillis() + 3650L * 86400_000L)
+        val expiry = Date(System.currentTimeMillis() + 8 * 365 * 24 * 60 * 60 * 1000L)
         val pair   = ApkSigner.newPrivateKeyCertificatePair(KS_ALIAS, expiry)
         val ks     = ApkSigner.newKeyStore(
             setOf(ApkSigner.KeyStoreEntry(KS_ALIAS, KS_PASS, pair))
