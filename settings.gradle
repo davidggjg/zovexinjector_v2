@@ -12,7 +12,8 @@ dependencyResolutionManagement {
         mavenCentral()
         maven { url 'https://jitpack.io' }
         maven {
-            url 'https://maven.pkg.github.com/revanced/registry'
+            name = "githubPackages"
+            url = uri("https://maven.pkg.github.com/revanced/registry")
             credentials(PasswordCredentials)
         }
     }
