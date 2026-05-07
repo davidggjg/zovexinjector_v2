@@ -10,12 +10,6 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        maven { url 'https://jitpack.io' }
-        maven {
-            name = "githubPackages"
-            url = uri("https://maven.pkg.github.com/revanced/registry")
-            credentials(PasswordCredentials)
-        }
     }
 }
 rootProject.name = "ZovexInjector"
