@@ -18,15 +18,15 @@ import java.util.Date
 class ApkSigner(private val context: Context) {
 
     companion object {
-        private const val KS_FILE = "zovex_bc.keystore"
+        private const val KS_FILE  = "zovex_bc2.keystore"
         private const val KS_ALIAS = "zovex"
-        private const val KS_PASS = "zovex2024"
+        private const val KS_PASS  = "zovex2024"
+    }
 
-        init {
-            if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
-                Security.addProvider(BouncyCastleProvider())
-            }
-        }
+    private val bc: Provider by lazy {
+        // נשתמש ב-BouncyCastle המובנה של אנדרואיד
+        Security.getProvider("BC")
+            ?: BouncyCastleProvider().also { Security.insertProviderAt(it, 1) }
     }
 
     fun sign(unsigned: File, out: File) {
@@ -61,39 +61,43 @@ class ApkSigner(private val context: Context) {
         val ksFile = File(context.filesDir, KS_FILE)
 
         if (ksFile.exists()) {
-            val ks = KeyStore.getInstance("BKS", "BC").also {
-                ksFile.inputStream().use { s -> it.load(s, KS_PASS.toCharArray()) }
+            try {
+                val ks = KeyStore.getInstance("BKS", bc).also {
+                    ksFile.inputStream().use { s -> it.load(s, KS_PASS.toCharArray()) }
+                }
+                val key  = ks.getKey(KS_ALIAS, KS_PASS.toCharArray()) as PrivateKey
+                val cert = ks.getCertificate(KS_ALIAS) as X509Certificate
+                return Pair(key, cert)
+            } catch (e: Exception) {
+                ksFile.delete() // keystore פגום — צור מחדש
             }
-            val key = ks.getKey(KS_ALIAS, KS_PASS.toCharArray()) as PrivateKey
-            val cert = ks.getCertificate(KS_ALIAS) as X509Certificate
-            return Pair(key, cert)
         }
 
-        // צור RSA key pair עם BouncyCastle
-        val kpg = KeyPairGenerator.getInstance("RSA", "BC")
+        // צור RSA key pair — ללא ציון provider ספציפי
+        val kpg = KeyPairGenerator.getInstance("RSA")
         kpg.initialize(2048, SecureRandom())
         val kp = kpg.generateKeyPair()
 
         // צור X509 certificate עם BouncyCastle
-        val now = System.currentTimeMillis()
+        val now     = System.currentTimeMillis()
         val subject = X500Name("CN=ZovexInjector, O=Zovex, C=IL")
-        val certBuilder = JcaX509v3CertificateBuilder(
+        val certHolder = JcaX509v3CertificateBuilder(
             subject,
             BigInteger.valueOf(now),
             Date(now - 86400_000L),
             Date(now + 3650L * 86400_000L),
             subject,
             kp.public
+        ).build(
+            JcaContentSignerBuilder("SHA256withRSA")
+                .build(kp.private)  // ללא provider ספציפי
         )
-        val signer = JcaContentSignerBuilder("SHA256withRSA")
-            .setProvider("BC")
-            .build(kp.private)
+
         val cert = JcaX509CertificateConverter()
-            .setProvider("BC")
-            .getCertificate(certBuilder.build(signer))
+            .getCertificate(certHolder)  // ללא provider ספציפי
 
         // שמור ב-BKS keystore
-        val ks = KeyStore.getInstance("BKS", "BC").also { it.load(null) }
+        val ks = KeyStore.getInstance("BKS", bc).also { it.load(null) }
         ks.setKeyEntry(KS_ALIAS, kp.private, KS_PASS.toCharArray(), arrayOf(cert))
         ksFile.outputStream().use { ks.store(it, KS_PASS.toCharArray()) }
 
