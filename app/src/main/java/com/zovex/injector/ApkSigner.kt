@@ -1,27 +1,38 @@
 package com.zovex.injector
 
 import android.content.Context
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
 import com.android.apksig.ApkSigner as GoogleApkSigner
 import com.iyxan23.zipalignjava.ZipAlign
+import org.bouncycastle.asn1.x500.X500Name
+import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
+import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
+import org.bouncycastle.jce.provider.BouncyCastleProvider
+import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 import java.io.File
 import java.io.RandomAccessFile
 import java.math.BigInteger
 import java.security.*
 import java.security.cert.X509Certificate
-import javax.security.auth.x500.X500Principal
+import java.util.Date
 
 class ApkSigner(private val context: Context) {
 
     companion object {
-        private const val AKS_ALIAS = "ZovexKey7"
+        private const val KS_FILE = "zovex_bc.keystore"
+        private const val KS_ALIAS = "zovex"
+        private const val KS_PASS = "zovex2024"
+
+        init {
+            if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
+                Security.addProvider(BouncyCastleProvider())
+            }
+        }
     }
 
     fun sign(unsigned: File, out: File) {
         val (key, cert) = getOrCreateKeyPair()
 
-        // שלב 1: zipalign אמיתי ב-Java
+        // שלב 1: zipalign
         val aligned = File(unsigned.parent, "aligned_${unsigned.name}")
         RandomAccessFile(unsigned, "r").use { raf ->
             aligned.outputStream().buffered().use { fos ->
@@ -29,7 +40,7 @@ class ApkSigner(private val context: Context) {
             }
         }
 
-        // שלב 2: חתימה עם apksig V1+V2+V3
+        // שלב 2: חתימה V1+V2+V3
         val signerConfig = GoogleApkSigner.SignerConfig.Builder(
             "CERT", key, listOf(cert)
         ).build()
@@ -47,32 +58,45 @@ class ApkSigner(private val context: Context) {
     }
 
     private fun getOrCreateKeyPair(): Pair<PrivateKey, X509Certificate> {
-        val aks = KeyStore.getInstance("AndroidKeyStore").also { it.load(null) }
-        if (aks.containsAlias(AKS_ALIAS)) {
-            return Pair(
-                aks.getKey(AKS_ALIAS, null) as PrivateKey,
-                aks.getCertificate(AKS_ALIAS) as X509Certificate
-            )
+        val ksFile = File(context.filesDir, KS_FILE)
+
+        if (ksFile.exists()) {
+            val ks = KeyStore.getInstance("BKS", "BC").also {
+                ksFile.inputStream().use { s -> it.load(s, KS_PASS.toCharArray()) }
+            }
+            val key = ks.getKey(KS_ALIAS, KS_PASS.toCharArray()) as PrivateKey
+            val cert = ks.getCertificate(KS_ALIAS) as X509Certificate
+            return Pair(key, cert)
         }
-        val spec = KeyGenParameterSpec.Builder(
-            AKS_ALIAS,
-            KeyProperties.PURPOSE_SIGN or KeyProperties.PURPOSE_VERIFY
+
+        // צור RSA key pair עם BouncyCastle
+        val kpg = KeyPairGenerator.getInstance("RSA", "BC")
+        kpg.initialize(2048, SecureRandom())
+        val kp = kpg.generateKeyPair()
+
+        // צור X509 certificate עם BouncyCastle
+        val now = System.currentTimeMillis()
+        val subject = X500Name("CN=ZovexInjector, O=Zovex, C=IL")
+        val certBuilder = JcaX509v3CertificateBuilder(
+            subject,
+            BigInteger.valueOf(now),
+            Date(now - 86400_000L),
+            Date(now + 3650L * 86400_000L),
+            subject,
+            kp.public
         )
-            .setKeySize(2048)
-            .setDigests(KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_SHA1)
-            .setSignaturePaddings(KeyProperties.SIGNATURE_PADDING_RSA_PKCS1)
-            .setCertificateSubject(X500Principal("CN=ZovexInjector, O=Zovex, C=IL"))
-            .setCertificateSerialNumber(BigInteger.valueOf(System.currentTimeMillis()))
-            .setCertificateNotBefore(java.util.Date(System.currentTimeMillis() - 86400_000L))
-            .setCertificateNotAfter(java.util.Date(System.currentTimeMillis() + 3650L * 86400_000L))
-            .build()
-        KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_RSA, "AndroidKeyStore").also {
-            it.initialize(spec)
-            it.generateKeyPair()
-        }
-        return Pair(
-            aks.getKey(AKS_ALIAS, null) as PrivateKey,
-            aks.getCertificate(AKS_ALIAS) as X509Certificate
-        )
+        val signer = JcaContentSignerBuilder("SHA256withRSA")
+            .setProvider("BC")
+            .build(kp.private)
+        val cert = JcaX509CertificateConverter()
+            .setProvider("BC")
+            .getCertificate(certBuilder.build(signer))
+
+        // שמור ב-BKS keystore
+        val ks = KeyStore.getInstance("BKS", "BC").also { it.load(null) }
+        ks.setKeyEntry(KS_ALIAS, kp.private, KS_PASS.toCharArray(), arrayOf(cert))
+        ksFile.outputStream().use { ks.store(it, KS_PASS.toCharArray()) }
+
+        return Pair(kp.private, cert)
     }
 }
