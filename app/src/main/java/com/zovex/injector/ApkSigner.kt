@@ -4,31 +4,32 @@ import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import com.android.apksig.ApkSigner as GoogleApkSigner
+import com.iyxan23.zipalignjava.ZipAlign
 import java.io.File
 import java.io.RandomAccessFile
 import java.math.BigInteger
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import java.security.*
 import java.security.cert.X509Certificate
-import java.util.zip.ZipEntry
-import java.util.zip.ZipFile
-import java.util.zip.ZipOutputStream
 import javax.security.auth.x500.X500Principal
 
 class ApkSigner(private val context: Context) {
 
     companion object {
-        private const val AKS_ALIAS = "ZovexKey6"
+        private const val AKS_ALIAS = "ZovexKey7"
     }
 
     fun sign(unsigned: File, out: File) {
         val (key, cert) = getOrCreateKeyPair()
 
-        // zipalign לפני חתימה — חובה ל-V2
+        // שלב 1: zipalign אמיתי ב-Java
         val aligned = File(unsigned.parent, "aligned_${unsigned.name}")
-        zipalign(unsigned, aligned)
+        RandomAccessFile(unsigned, "r").use { raf ->
+            aligned.outputStream().buffered().use { fos ->
+                ZipAlign.alignZip(raf, fos)
+            }
+        }
 
+        // שלב 2: חתימה עם apksig V1+V2+V3
         val signerConfig = GoogleApkSigner.SignerConfig.Builder(
             "CERT", key, listOf(cert)
         ).build()
@@ -43,28 +44,6 @@ class ApkSigner(private val context: Context) {
             .sign()
 
         aligned.delete()
-    }
-
-    private fun zipalign(input: File, output: File) {
-        val ALIGNMENT = 4
-        ZipOutputStream(output.outputStream().buffered()).use { zos ->
-            zos.setLevel(0)
-            ZipFile(input).use { zip ->
-                zip.entries().asSequence().forEach { entry ->
-                    val data = zip.getInputStream(entry).readBytes()
-                    val newEntry = ZipEntry(entry.name)
-                    if (entry.method == ZipEntry.STORED) {
-                        newEntry.method = ZipEntry.STORED
-                        newEntry.size = data.size.toLong()
-                        newEntry.compressedSize = data.size.toLong()
-                        newEntry.crc = entry.crc
-                    }
-                    zos.putNextEntry(newEntry)
-                    zos.write(data)
-                    zos.closeEntry()
-                }
-            }
-        }
     }
 
     private fun getOrCreateKeyPair(): Pair<PrivateKey, X509Certificate> {
