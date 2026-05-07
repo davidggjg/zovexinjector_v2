@@ -18,13 +18,12 @@ import java.util.Date
 class ApkSigner(private val context: Context) {
 
     companion object {
-        private const val KS_FILE  = "zovex_bc2.keystore"
+        private const val KS_FILE  = "zovex_bc3.keystore"
         private const val KS_ALIAS = "zovex"
         private const val KS_PASS  = "zovex2024"
     }
 
     private val bc: Provider by lazy {
-        // נשתמש ב-BouncyCastle המובנה של אנדרואיד
         Security.getProvider("BC")
             ?: BouncyCastleProvider().also { Security.insertProviderAt(it, 1) }
     }
@@ -32,11 +31,12 @@ class ApkSigner(private val context: Context) {
     fun sign(unsigned: File, out: File) {
         val (key, cert) = getOrCreateKeyPair()
 
-        // שלב 1: zipalign
+        // שלב 1: zipalign עם 4KB לקבצים רגילים ו-16KB ל-.so files
         val aligned = File(unsigned.parent, "aligned_${unsigned.name}")
         RandomAccessFile(unsigned, "r").use { raf ->
             aligned.outputStream().buffered().use { fos ->
-                ZipAlign.alignZip(raf, fos)
+                // 4 = alignment רגיל, 4096 = alignment ל-.so (16KB)
+                ZipAlign.alignZip(raf, fos, 4, 4096)
             }
         }
 
@@ -51,6 +51,7 @@ class ApkSigner(private val context: Context) {
             .setV1SigningEnabled(true)
             .setV2SigningEnabled(true)
             .setV3SigningEnabled(true)
+            .setMinSdkVersion(26)
             .build()
             .sign()
 
@@ -69,16 +70,14 @@ class ApkSigner(private val context: Context) {
                 val cert = ks.getCertificate(KS_ALIAS) as X509Certificate
                 return Pair(key, cert)
             } catch (e: Exception) {
-                ksFile.delete() // keystore פגום — צור מחדש
+                ksFile.delete()
             }
         }
 
-        // צור RSA key pair — ללא ציון provider ספציפי
         val kpg = KeyPairGenerator.getInstance("RSA")
         kpg.initialize(2048, SecureRandom())
         val kp = kpg.generateKeyPair()
 
-        // צור X509 certificate עם BouncyCastle
         val now     = System.currentTimeMillis()
         val subject = X500Name("CN=ZovexInjector, O=Zovex, C=IL")
         val certHolder = JcaX509v3CertificateBuilder(
@@ -89,14 +88,11 @@ class ApkSigner(private val context: Context) {
             subject,
             kp.public
         ).build(
-            JcaContentSignerBuilder("SHA256withRSA")
-                .build(kp.private)  // ללא provider ספציפי
+            JcaContentSignerBuilder("SHA256withRSA").build(kp.private)
         )
 
-        val cert = JcaX509CertificateConverter()
-            .getCertificate(certHolder)  // ללא provider ספציפי
+        val cert = JcaX509CertificateConverter().getCertificate(certHolder)
 
-        // שמור ב-BKS keystore
         val ks = KeyStore.getInstance("BKS", bc).also { it.load(null) }
         ks.setKeyEntry(KS_ALIAS, kp.private, KS_PASS.toCharArray(), arrayOf(cert))
         ksFile.outputStream().use { ks.store(it, KS_PASS.toCharArray()) }
