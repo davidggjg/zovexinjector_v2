@@ -13,7 +13,10 @@ dependencyResolutionManagement {
         maven {
             name = "GitHubPackages"
             url = uri("https://maven.pkg.github.com/davidggjg/zovex-signer")
-            credentials(PasswordCredentials)
+            credentials {
+                username = System.getenv("ORG_GRADLE_PROJECT_githubPackagesUsername") ?: ""
+                password = System.getenv("ORG_GRADLE_PROJECT_githubPackagesPassword") ?: ""
+            }
         }
     }
 }
