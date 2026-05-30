@@ -1,11 +1,11 @@
 package com.zovex.signer
 
 import com.android.apksig.ApkSigner
-import com.zovex.bc.asn1.x500.X500Name
-import com.zovex.bc.cert.jcajce.JcaX509CertificateConverter
-import com.zovex.bc.cert.jcajce.JcaX509v3CertificateBuilder
-import com.zovex.bc.jce.provider.BouncyCastleProvider
-import com.zovex.bc.operator.jcajce.JcaContentSignerBuilder
+import org.bouncycastle.asn1.x500.X500Name
+import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
+import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
+import org.bouncycastle.jce.provider.BouncyCastleProvider
+import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
 import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
