@@ -1,7 +1,7 @@
 plugins {
     id 'org.jetbrains.kotlin.jvm'
     id 'maven-publish'
-    id 'com.github.johnrengelman.shadow' version '8.3.5'
+    id 'com.gradleup.shadow' version '8.3.5'
 }
 
 kotlin {
@@ -30,7 +30,7 @@ publishing {
         maven(MavenPublication) {
             groupId = 'com.zovex'
             artifactId = 'signer'
-            version = '1.0.6'
+            version = '1.0.7'
             artifact(tasks.shadowJar) {
                 classifier = null
             }
