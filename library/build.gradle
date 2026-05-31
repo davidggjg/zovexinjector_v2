@@ -1,7 +1,7 @@
 plugins {
     id 'org.jetbrains.kotlin.jvm'
     id 'maven-publish'
-    id 'com.github.johnrengelman.shadow' version '8.3.6'
+    id 'com.github.johnrengelman.shadow' version '8.3.5'
 }
 
 kotlin {
