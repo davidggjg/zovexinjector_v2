@@ -30,7 +30,7 @@ publishing {
         maven(MavenPublication) {
             groupId = 'com.zovex'
             artifactId = 'signer'
-            version = '1.0.7'
+            version = '1.0.8'
             artifact(tasks.shadowJar) {
                 classifier = null
             }
