@@ -1,163 +1,134 @@
-<!DOCTYPE html>
-<html dir="rtl" lang="he">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ZovexInjector</title>
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: #121212; color: #fff; font-family: Arial, sans-serif; }
-  .screen { max-width: 420px; margin: 0 auto; padding: 16px; }
-  .toolbar { background: #00F5C4; padding: 16px; text-align: center; margin-bottom: 0; }
-  .toolbar h1 { color: #000; font-size: 20px; font-weight: bold; }
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#121212">
 
-  .pick-apk {
-    background: #1E1E1E;
-    height: 72px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    margin-bottom: 24px;
-    cursor: pointer;
-    border-radius: 4px;
-    gap: 8px;
-  }
-  .pick-apk:active { opacity: 0.7; }
-  .pick-apk span { color: #00F5C4; font-size: 18px; font-weight: bold; }
-  .pick-apk .icon { font-size: 24px; }
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
 
-  label { display: block; text-align: right; color: #AAAAAA; font-size: 12px; margin-bottom: 4px; }
-  .optional-row { display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 4px; }
-  .optional-row .opt { color: #555; font-size: 10px; }
+        <LinearLayout
+            android:id="@+id/btnPickApk"
+            android:layout_width="match_parent"
+            android:layout_height="72dp"
+            android:background="#1E1E1E"
+            android:orientation="horizontal"
+            android:gravity="center"
+            android:layout_marginBottom="24dp">
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="📁  "
+                android:textSize="24sp"/>
+            <TextView
+                android:id="@+id/tvApkName"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="בחר קובץ APK"
+                android:textColor="#00F5C4"
+                android:textSize="18sp"
+                android:textStyle="bold"/>
+        </LinearLayout>
 
-  input, textarea {
-    width: 100%;
-    background: #1E1E1E;
-    border: none;
-    color: #fff;
-    padding: 12px;
-    font-size: 14px;
-    text-align: right;
-    margin-bottom: 16px;
-    border-radius: 4px;
-    outline: none;
-    font-family: Arial, sans-serif;
-  }
-  textarea { height: 100px; resize: none; }
-  input::placeholder, textarea::placeholder { color: #555; }
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="כותרת *" android:textColor="#AAAAAA" android:textSize="12sp"
+            android:layout_gravity="end" android:layout_marginBottom="4dp"/>
+        <EditText android:id="@+id/etTitle"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:background="#1E1E1E" android:textColor="#FFFFFF"
+            android:textColorHint="#555555" android:padding="12dp"
+            android:gravity="end" android:inputType="text"
+            android:layout_marginBottom="16dp"/>
 
-  .hint { text-align: right; color: #555; font-size: 10px; margin-top: -12px; margin-bottom: 24px; }
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="הודעה *" android:textColor="#AAAAAA" android:textSize="12sp"
+            android:layout_gravity="end" android:layout_marginBottom="4dp"/>
+        <EditText android:id="@+id/etMessage"
+            android:layout_width="match_parent" android:layout_height="100dp"
+            android:background="#1E1E1E" android:textColor="#FFFFFF"
+            android:textColorHint="#555555" android:padding="12dp"
+            android:gravity="end|top" android:inputType="textMultiLine"
+            android:hint="הכנס את תוכן ההודעה...."
+            android:layout_marginBottom="16dp"/>
 
-  .btn-inject {
-    display: block;
-    text-align: center;
-    color: #00F5C4;
-    font-size: 22px;
-    font-weight: bold;
-    padding: 8px;
-    margin-bottom: 24px;
-    cursor: pointer;
-  }
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="טקסט כפתור אישור" android:textColor="#AAAAAA" android:textSize="12sp"
+            android:layout_gravity="end" android:layout_marginBottom="4dp"/>
+        <EditText android:id="@+id/etButtonText"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:background="#1E1E1E" android:textColor="#FFFFFF"
+            android:padding="12dp" android:gravity="end"
+            android:text="אישור" android:inputType="text"
+            android:layout_marginBottom="16dp"/>
 
-  .btn-delete {
-    width: 100%;
-    background: #00F5C4;
-    color: #FF6B6B;
-    border: none;
-    height: 56px;
-    font-size: 16px;
-    font-weight: bold;
-    border-radius: 4px;
-    margin-bottom: 16px;
-    cursor: pointer;
-  }
+        <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:orientation="horizontal" android:gravity="end"
+            android:layout_marginBottom="4dp">
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="אופציונלי" android:textColor="#555555" android:textSize="10sp"
+                android:layout_marginEnd="8dp"/>
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="קישור טלגרם / וואטסאפ" android:textColor="#AAAAAA" android:textSize="12sp"/>
+        </LinearLayout>
+        <EditText android:id="@+id/etTelegramLink"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:background="#1E1E1E" android:textColor="#FFFFFF"
+            android:textColorHint="#555555" android:padding="12dp"
+            android:gravity="end" android:inputType="textUri"
+            android:hint="https://t.me/mychannel"
+            android:layout_marginBottom="16dp"/>
 
-  .log-box {
-    background: #1E1E1E;
-    padding: 12px;
-    border-radius: 4px;
-    display: none;
-  }
-  .log-status { color: #00F5C4; font-size: 14px; font-weight: bold; text-align: right; margin-bottom: 8px; }
-  .log-text { color: #CCC; font-size: 11px; font-family: monospace; text-align: right; white-space: pre-wrap; }
-</style>
-</head>
-<body>
-<div class="toolbar"><h1>ZovexInjector</h1></div>
-<div class="screen">
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="מזהה ייחודי (Pref Key)" android:textColor="#AAAAAA" android:textSize="12sp"
+            android:layout_gravity="end" android:layout_marginBottom="4dp"/>
+        <EditText android:id="@+id/etPrefKey"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:background="#1E1E1E" android:textColor="#FFFFFF"
+            android:padding="12dp" android:gravity="end"
+            android:text="my_dialog_v1" android:inputType="text"
+            android:layout_marginBottom="4dp"/>
+        <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="שנה מספר בין גרסאות כדי להציג שוב"
+            android:textColor="#555555" android:textSize="10sp"
+            android:layout_gravity="end" android:layout_marginBottom="24dp"/>
 
-  <div class="pick-apk" onclick="pickApk()">
-    <span class="icon">📁</span>
-    <span id="tvApkName">בחר קובץ APK</span>
-  </div>
+        <TextView android:id="@+id/btnInject"
+            android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:text="הזרק דיאלוג ⚡"
+            android:textColor="#00F5C4" android:textSize="22sp" android:textStyle="bold"
+            android:layout_gravity="center" android:layout_marginBottom="24dp"
+            android:padding="8dp"/>
 
-  <label>כותרת *</label>
-  <input id="etTitle" type="text" />
+        <Button android:id="@+id/btnDelete"
+            android:layout_width="match_parent" android:layout_height="56dp"
+            android:text="מחק דיאלוגים קיימים 🗑"
+            android:textColor="#FF6B6B" android:textSize="16sp"
+            android:backgroundTint="#00F5C4"
+            android:layout_marginBottom="16dp"/>
 
-  <label>הודעה *</label>
-  <textarea id="etMessage" placeholder="הכנס את תוכן ההודעה...."></textarea>
+        <LinearLayout android:id="@+id/logContainer"
+            android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="#1E1E1E" android:padding="12dp"
+            android:visibility="gone">
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:orientation="horizontal" android:gravity="end"
+                android:layout_marginBottom="8dp">
+                <TextView android:id="@+id/tvLogStatus"
+                    android:layout_width="wrap_content" android:layout_height="wrap_content"
+                    android:textColor="#00F5C4" android:textSize="14sp" android:textStyle="bold"/>
+                <ProgressBar android:id="@+id/progressLog"
+                    android:layout_width="20dp" android:layout_height="20dp"
+                    android:layout_marginStart="8dp" android:visibility="gone"/>
+            </LinearLayout>
+            <TextView android:id="@+id/tvLog"
+                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:textColor="#CCCCCC" android:textSize="11sp"
+                android:fontFamily="monospace" android:gravity="end"/>
+        </LinearLayout>
 
-  <label>טקסט כפתור אישור</label>
-  <input id="etButtonText" type="text" value="אישור" />
-
-  <div class="optional-row">
-    <span class="opt">אופציונלי</span>
-    <label style="margin:0">קישור טלגרם / וואטסאפ</label>
-  </div>
-  <input id="etTelegramLink" type="text" placeholder="https://t.me/mychannel" style="margin-bottom:16px" />
-
-  <label>מזהה ייחודי (Pref Key)</label>
-  <input id="etPrefKey" type="text" value="my_dialog_v1" />
-  <p class="hint">שנה מספר בין גרסאות כדי להציג שוב</p>
-
-  <div class="btn-inject" onclick="inject()">הזרק דיאלוג ⚡</div>
-
-  <button class="btn-delete" onclick="deleteDialogs()">מחק דיאלוגים קיימים 🗑</button>
-
-  <div class="log-box" id="logContainer">
-    <div class="log-status" id="tvLogStatus"></div>
-    <div class="log-text" id="tvLog"></div>
-  </div>
-
-</div>
-<script>
-let apkSelected = false;
-
-function pickApk() {
-  const input = document.createElement('input');
-  input.type = 'file';
-  input.accept = '.apk';
-  input.onchange = e => {
-    const file = e.target.files[0];
-    if (file) {
-      document.getElementById('tvApkName').textContent = file.name;
-      apkSelected = true;
-    }
-  };
-  input.click();
-}
-
-function showLog(status, text) {
-  const box = document.getElementById('logContainer');
-  box.style.display = 'block';
-  document.getElementById('tvLogStatus').textContent = status;
-  document.getElementById('tvLog').textContent = text;
-}
-
-function inject() {
-  if (!apkSelected) { alert('בחר קובץ APK קודם'); return; }
-  const title = document.getElementById('etTitle').value.trim();
-  const msg   = document.getElementById('etMessage').value.trim();
-  if (!title || !msg) { alert('נא למלא כותרת והודעה'); return; }
-  showLog('מעבד... ⏳', 'פורק APK...\nמזריק דיאלוג...\nחותם APK...');
-  setTimeout(() => showLog('הסתיים! ✅', 'APK מוכן להורדה'), 2000);
-}
-
-function deleteDialogs() {
-  if (!apkSelected) { alert('בחר קובץ APK קודם'); return; }
-  showLog('מעבד... ⏳', 'פורק APK...\nמוחק דיאלוגים...\nחותם APK...');
-  setTimeout(() => showLog('דיאלוגים בוטלו! ✅', 'APK מוכן להורדה'), 2000);
-}
-</script>
-</body>
-</html>
+    </LinearLayout>
+</ScrollView>
