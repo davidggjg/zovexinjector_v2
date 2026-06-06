@@ -203,7 +203,7 @@ class DexPatcher {
                 ImmutableMethod(
                     method.definingClass, method.name, method.parameters,
                     method.returnType, method.accessFlags, method.annotations,
-                    null, mb.build()
+                    null, mb
                 )
             }
 
