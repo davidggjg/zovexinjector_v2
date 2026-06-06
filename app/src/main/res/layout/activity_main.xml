@@ -2,39 +2,37 @@
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#121212">
+    android:background="#121212"
+    android:fitsSystemWindows="true">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical">
 
-        <!-- APK picker בראש במקום toolbar -->
         <LinearLayout
             android:id="@+id/btnPickApk"
             android:layout_width="match_parent"
-            android:layout_height="56dp"
+            android:layout_height="52dp"
             android:background="#00F5C4"
             android:orientation="horizontal"
-            android:gravity="center"
+            android:gravity="center_vertical"
             android:paddingStart="16dp"
             android:paddingEnd="16dp">
             <TextView
-                android:layout_width="0dp"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="📁 בחר קובץ APK"
-                android:textColor="#000000"
-                android:textSize="16sp"
-                android:textStyle="bold"/>
+                android:text="📁 "
+                android:textSize="18sp"/>
             <TextView
                 android:id="@+id/tvApkName"
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
-                android:layout_weight="2"
-                android:text="לא נבחר קובץ"
+                android:layout_weight="1"
+                android:text="בחר קובץ APK"
                 android:textColor="#000000"
-                android:textSize="13sp"
+                android:textSize="15sp"
+                android:textStyle="bold"
                 android:gravity="end"
                 android:ellipsize="start"
                 android:singleLine="true"/>
@@ -44,83 +42,83 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:padding="16dp">
+            android:padding="12dp">
 
             <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:text="כותרת *" android:textColor="#AAAAAA" android:textSize="12sp"
-                android:layout_gravity="end" android:layout_marginBottom="4dp"/>
+                android:text="כותרת *" android:textColor="#AAAAAA" android:textSize="11sp"
+                android:layout_gravity="end" android:layout_marginBottom="3dp"/>
             <EditText android:id="@+id/etTitle"
-                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_width="match_parent" android:layout_height="44dp"
                 android:background="#1E1E1E" android:textColor="#FFFFFF"
-                android:textColorHint="#555555" android:padding="12dp"
+                android:textColorHint="#555555" android:padding="10dp"
                 android:gravity="end" android:inputType="text"
-                android:layout_marginBottom="16dp"/>
+                android:layout_marginBottom="12dp"/>
 
             <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:text="הודעה *" android:textColor="#AAAAAA" android:textSize="12sp"
-                android:layout_gravity="end" android:layout_marginBottom="4dp"/>
+                android:text="הודעה *" android:textColor="#AAAAAA" android:textSize="11sp"
+                android:layout_gravity="end" android:layout_marginBottom="3dp"/>
             <EditText android:id="@+id/etMessage"
-                android:layout_width="match_parent" android:layout_height="100dp"
+                android:layout_width="match_parent" android:layout_height="80dp"
                 android:background="#1E1E1E" android:textColor="#FFFFFF"
-                android:textColorHint="#555555" android:padding="12dp"
+                android:textColorHint="#555555" android:padding="10dp"
                 android:gravity="end|top" android:inputType="textMultiLine"
                 android:hint="הכנס את תוכן ההודעה...."
-                android:layout_marginBottom="16dp"/>
+                android:layout_marginBottom="12dp"/>
 
             <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:text="טקסט כפתור אישור" android:textColor="#AAAAAA" android:textSize="12sp"
-                android:layout_gravity="end" android:layout_marginBottom="4dp"/>
+                android:text="טקסט כפתור אישור" android:textColor="#AAAAAA" android:textSize="11sp"
+                android:layout_gravity="end" android:layout_marginBottom="3dp"/>
             <EditText android:id="@+id/etButtonText"
-                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_width="match_parent" android:layout_height="44dp"
                 android:background="#1E1E1E" android:textColor="#FFFFFF"
-                android:padding="12dp" android:gravity="end"
+                android:padding="10dp" android:gravity="end"
                 android:text="אישור" android:inputType="text"
-                android:layout_marginBottom="16dp"/>
+                android:layout_marginBottom="12dp"/>
 
             <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
                 android:orientation="horizontal" android:gravity="end"
-                android:layout_marginBottom="4dp">
+                android:layout_marginBottom="3dp">
                 <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
                     android:text="אופציונלי" android:textColor="#555555" android:textSize="10sp"
-                    android:layout_marginEnd="8dp"/>
+                    android:layout_marginEnd="6dp"/>
                 <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
-                    android:text="קישור טלגרם / וואטסאפ" android:textColor="#AAAAAA" android:textSize="12sp"/>
+                    android:text="קישור טלגרם / וואטסאפ" android:textColor="#AAAAAA" android:textSize="11sp"/>
             </LinearLayout>
             <EditText android:id="@+id/etTelegramLink"
-                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_width="match_parent" android:layout_height="44dp"
                 android:background="#1E1E1E" android:textColor="#FFFFFF"
-                android:textColorHint="#555555" android:padding="12dp"
+                android:textColorHint="#555555" android:padding="10dp"
                 android:gravity="end" android:inputType="textUri"
                 android:hint="https://t.me/mychannel"
-                android:layout_marginBottom="16dp"/>
+                android:layout_marginBottom="12dp"/>
 
             <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:text="מזהה ייחודי (Pref Key)" android:textColor="#AAAAAA" android:textSize="12sp"
-                android:layout_gravity="end" android:layout_marginBottom="4dp"/>
+                android:text="מזהה ייחודי (Pref Key)" android:textColor="#AAAAAA" android:textSize="11sp"
+                android:layout_gravity="end" android:layout_marginBottom="3dp"/>
             <EditText android:id="@+id/etPrefKey"
-                android:layout_width="match_parent" android:layout_height="wrap_content"
+                android:layout_width="match_parent" android:layout_height="44dp"
                 android:background="#1E1E1E" android:textColor="#FFFFFF"
-                android:padding="12dp" android:gravity="end"
+                android:padding="10dp" android:gravity="end"
                 android:text="my_dialog_v1" android:inputType="text"
-                android:layout_marginBottom="4dp"/>
+                android:layout_marginBottom="3dp"/>
             <TextView android:layout_width="wrap_content" android:layout_height="wrap_content"
                 android:text="שנה מספר בין גרסאות כדי להציג שוב"
                 android:textColor="#555555" android:textSize="10sp"
-                android:layout_gravity="end" android:layout_marginBottom="24dp"/>
+                android:layout_gravity="end" android:layout_marginBottom="16dp"/>
 
             <TextView android:id="@+id/btnInject"
                 android:layout_width="wrap_content" android:layout_height="wrap_content"
                 android:text="הזרק דיאלוג ⚡"
-                android:textColor="#00F5C4" android:textSize="22sp" android:textStyle="bold"
-                android:layout_gravity="center" android:layout_marginBottom="24dp"
+                android:textColor="#00F5C4" android:textSize="20sp" android:textStyle="bold"
+                android:layout_gravity="center" android:layout_marginBottom="16dp"
                 android:padding="8dp"/>
 
             <Button android:id="@+id/btnDelete"
-                android:layout_width="match_parent" android:layout_height="56dp"
+                android:layout_width="match_parent" android:layout_height="52dp"
                 android:text="מחק דיאלוגים קיימים 🗑"
-                android:textColor="#FF6B6B" android:textSize="16sp"
+                android:textColor="#FF6B6B" android:textSize="15sp"
                 android:backgroundTint="#00F5C4"
-                android:layout_marginBottom="16dp"/>
+                android:layout_marginBottom="12dp"/>
 
             <LinearLayout android:id="@+id/logContainer"
                 android:layout_width="match_parent" android:layout_height="wrap_content"
@@ -132,7 +130,7 @@
                     android:layout_marginBottom="8dp">
                     <TextView android:id="@+id/tvLogStatus"
                         android:layout_width="wrap_content" android:layout_height="wrap_content"
-                        android:textColor="#00F5C4" android:textSize="14sp" android:textStyle="bold"/>
+                        android:textColor="#00F5C4" android:textSize="13sp" android:textStyle="bold"/>
                     <ProgressBar android:id="@+id/progressLog"
                         android:layout_width="20dp" android:layout_height="20dp"
                         android:layout_marginStart="8dp" android:visibility="gone"/>
