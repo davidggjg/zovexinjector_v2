@@ -2,6 +2,8 @@ package com.zovex.injector
 
 import android.content.Context
 import android.util.Log
+import com.android.tools.smali.dexlib2.DexFileFactory
+import com.android.tools.smali.dexlib2.Opcodes
 import java.io.File
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
@@ -58,7 +60,7 @@ class InjectionEngine(private val context: Context) {
         log("פורק APK...")
         unpack(inputApk, workDir)
 
-        val target = activityClass ?: findMainActivity(inputApk, workDir)
+        val target = activityClass ?: findMainActivity(workDir)
         if (target == null) {
             workDir.deleteRecursively()
             throw Exception("לא נמצא Activity מתאים")
@@ -98,27 +100,12 @@ class InjectionEngine(private val context: Context) {
         return signed
     }
 
-    private fun findMainActivity(apk: File, workDir: File): String? {
-        // Try manifest first
-        try {
-            val manifest = File(workDir, "AndroidManifest.xml")
-            if (manifest.exists()) {
-                val text = manifest.readText()
-                val regex = Regex("android:name=\"([^\"]+Activity[^\"]*?)\"")
-                val match = regex.find(text)
-                if (match != null) {
-                    val name = match.groupValues[1]
-                    return if (name.startsWith("L")) name else "L${name.replace('.', '/')};"
-                }
-            }
-        } catch (e: Exception) { /* ignore */ }
-
-        // Try DEX scanning
+    private fun findMainActivity(workDir: File): String? {
         val dexFiles = workDir.listFiles { f -> f.name.matches(Regex("classes\\d*\\.dex")) } ?: return null
         val candidates = mutableListOf<String>()
         dexFiles.forEach { dex ->
             try {
-                val dexFile = org.jf.dexlib2.DexFileFactory.loadDexFile(dex.absolutePath, org.jf.dexlib2.Opcodes.forApi(26))
+                val dexFile = DexFileFactory.loadDexFile(dex.absolutePath, Opcodes.forApi(26))
                 dexFile.classes.forEach { cls ->
                     val superClass = cls.superclass ?: ""
                     if (superClass.contains("Activity") && !cls.type.contains("Test")) {
@@ -137,11 +124,13 @@ class InjectionEngine(private val context: Context) {
     private fun unpack(apk: File, dir: File) {
         ZipFile(apk).use { zip ->
             zip.entries().asSequence().forEach { entry ->
-                val out = File(dir, entry.name)
-                if (entry.isDirectory) { out.mkdirs(); return@forEach }
-                out.parentFile?.mkdirs()
+                val outFile = File(dir, entry.name)
+                // Zip Slip protection
+                if (!outFile.canonicalPath.startsWith(dir.canonicalPath)) return@forEach
+                if (entry.isDirectory) { outFile.mkdirs(); return@forEach }
+                outFile.parentFile?.mkdirs()
                 zip.getInputStream(entry).use { input ->
-                    out.outputStream().use { input.copyTo(it) }
+                    outFile.outputStream().use { input.copyTo(it) }
                 }
             }
         }
