@@ -14,7 +14,9 @@ import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 import com.android.tools.smali.dexlib2.immutable.ImmutableClassDef
 import com.android.tools.smali.dexlib2.immutable.ImmutableDexFile
 import com.android.tools.smali.dexlib2.immutable.ImmutableMethod
+import com.android.tools.smali.dexlib2.immutable.ImmutableAnnotation
 import com.android.tools.smali.dexlib2.immutable.ImmutableMethodImplementation
+import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
 import com.android.tools.smali.dexlib2.immutable.reference.ImmutableMethodReference
 import com.android.tools.smali.dexlib2.immutable.reference.ImmutableStringReference
 import com.android.tools.smali.dexlib2.immutable.reference.ImmutableTypeReference
@@ -201,9 +203,14 @@ class DexPatcher {
 
                 injected = true
                 ImmutableMethod(
-                    method.definingClass, method.name, method.parameters,
-                    method.returnType, method.accessFlags, method.annotations,
-                    null, mb
+                    method.definingClass,
+                    method.name,
+                    method.parameters?.map { ImmutableMethodParameter(it.type, it.annotations, it.name) },
+                    method.returnType,
+                    method.accessFlags,
+                    method.annotations?.map { ImmutableAnnotation(it.visibility, it.type, it.elements) }?.toSet(),
+                    null,
+                    ImmutableMethodImplementation(mb.registerCount, mb.instructions.toList(), emptyList(), emptyList())
                 )
             }
 
