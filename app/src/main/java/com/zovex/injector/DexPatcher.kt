@@ -14,9 +14,7 @@ import com.android.tools.smali.dexlib2.iface.reference.MethodReference
 import com.android.tools.smali.dexlib2.immutable.ImmutableClassDef
 import com.android.tools.smali.dexlib2.immutable.ImmutableDexFile
 import com.android.tools.smali.dexlib2.immutable.ImmutableMethod
-import com.android.tools.smali.dexlib2.immutable.ImmutableAnnotation
 import com.android.tools.smali.dexlib2.immutable.ImmutableMethodImplementation
-import com.android.tools.smali.dexlib2.immutable.ImmutableMethodParameter
 import com.android.tools.smali.dexlib2.immutable.reference.ImmutableMethodReference
 import com.android.tools.smali.dexlib2.immutable.reference.ImmutableStringReference
 import com.android.tools.smali.dexlib2.immutable.reference.ImmutableTypeReference
@@ -32,6 +30,7 @@ data class DialogConfig(
 
 class DexPatcher {
 
+    // ===== מחיקת דיאלוגים =====
     fun deleteDialogsFromDex(dexFile: File, outDex: File): Int {
         val dex = DexFileFactory.loadDexFile(dexFile.absolutePath, Opcodes.forApi(26))
         var count = 0
@@ -47,12 +46,12 @@ class DexPatcher {
                     if (op == Opcode.INVOKE_VIRTUAL || op == Opcode.INVOKE_VIRTUAL_RANGE) {
                         val ref = (ins as? ReferenceInstruction)?.reference
                         if (ref is MethodReference) {
-                            val cls2 = ref.definingClass ?: ""
+                            val defClass = ref.definingClass ?: ""
                             val name = ref.name ?: ""
-                            val ret  = ref.returnType ?: ""
+                            val ret = ref.returnType ?: ""
                             if (name == "show" &&
                                 ret == "Landroid/app/AlertDialog;" &&
-                                (cls2.contains("AlertDialog") || cls2.contains("Dialog\$Builder"))) {
+                                (defClass.contains("AlertDialog") || defClass.contains("Dialog\$Builder"))) {
                                 modified = true
                                 count++
                                 continue
@@ -64,16 +63,13 @@ class DexPatcher {
 
                 if (!modified) return@map method
 
-                val newImpl = ImmutableMethodImplementation(
-                    impl.registerCount,
-                    newInstructions,
-                    impl.tryBlocks,
-                    impl.debugItems
-                )
                 ImmutableMethod(
-                    method.definingClass, method.name, method.parameters,
-                    method.returnType, method.accessFlags, method.annotations,
-                    null, newImpl
+                    method.definingClass, method.name, null,
+                    method.returnType, method.accessFlags, null, null,
+                    ImmutableMethodImplementation(
+                        impl.registerCount, newInstructions,
+                        impl.tryBlocks, impl.debugItems
+                    )
                 )
             }
             ImmutableClassDef(
@@ -83,10 +79,14 @@ class DexPatcher {
             )
         }
 
-        DexFileFactory.writeDexFile(outDex.absolutePath, ImmutableDexFile(Opcodes.forApi(26), newClasses))
+        DexFileFactory.writeDexFile(
+            outDex.absolutePath,
+            ImmutableDexFile(Opcodes.forApi(26), newClasses)
+        )
         return count
     }
 
+    // ===== הזרקת דיאלוג =====
     fun injectDialog(dexFile: File, outDex: File, cfg: DialogConfig, targetClass: String): Boolean {
         val dex = DexFileFactory.loadDexFile(dexFile.absolutePath, Opcodes.forApi(26))
         var injected = false
@@ -107,7 +107,6 @@ class DexPatcher {
 
                 val mb = MethodImplementationBuilder(newRegCount)
 
-                // SharedPreferences prefs = this.getSharedPreferences(key, 0)
                 mb.addInstruction(BuilderInstruction21c(Opcode.CONST_STRING, v0,
                     ImmutableStringReference("zovex_sp_${cfg.prefKey}")))
                 mb.addInstruction(BuilderInstruction11n(Opcode.CONST_4, v1, 0))
@@ -116,7 +115,6 @@ class DexPatcher {
                         listOf("Ljava/lang/String;", "I"), "Landroid/content/SharedPreferences;")))
                 mb.addInstruction(BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, v2))
 
-                // boolean shown = prefs.getBoolean(prefKey, false)
                 mb.addInstruction(BuilderInstruction21c(Opcode.CONST_STRING, v0,
                     ImmutableStringReference(cfg.prefKey)))
                 mb.addInstruction(BuilderInstruction11n(Opcode.CONST_4, v1, 0))
@@ -125,11 +123,9 @@ class DexPatcher {
                         listOf("Ljava/lang/String;", "Z"), "Z")))
                 mb.addInstruction(BuilderInstruction11x(Opcode.MOVE_RESULT, v0))
 
-                // if (shown) goto end
-                val endLabel = mb.addLabel("end_zovex_${cfg.prefKey.replace('.', '_')}")
+                val endLabel = mb.addLabel("end_zovex_${cfg.prefKey.replace('.','_').replace('-','_')}")
                 mb.addInstruction(BuilderInstruction21t(Opcode.IF_NEZ, v0, endLabel))
 
-                // prefs.edit().putBoolean(key, true).apply()
                 mb.addInstruction(BuilderInstruction35c(Opcode.INVOKE_INTERFACE, 1, v2, 0, 0, 0, 0,
                     ImmutableMethodReference("Landroid/content/SharedPreferences;", "edit",
                         emptyList(), "Landroid/content/SharedPreferences\$Editor;")))
@@ -146,14 +142,12 @@ class DexPatcher {
                     ImmutableMethodReference("Landroid/content/SharedPreferences\$Editor;", "apply",
                         emptyList(), "V")))
 
-                // new AlertDialog.Builder(this)
                 mb.addInstruction(BuilderInstruction21c(Opcode.NEW_INSTANCE, v3,
                     ImmutableTypeReference("Landroid/app/AlertDialog\$Builder;")))
                 mb.addInstruction(BuilderInstruction35c(Opcode.INVOKE_DIRECT, 2, v3, p0, 0, 0, 0,
                     ImmutableMethodReference("Landroid/app/AlertDialog\$Builder;", "<init>",
                         listOf("Landroid/content/Context;"), "V")))
 
-                // .setTitle
                 mb.addInstruction(BuilderInstruction21c(Opcode.CONST_STRING, v0,
                     ImmutableStringReference(cfg.title)))
                 mb.addInstruction(BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 2, v3, v0, 0, 0, 0,
@@ -161,7 +155,6 @@ class DexPatcher {
                         listOf("Ljava/lang/CharSequence;"), "Landroid/app/AlertDialog\$Builder;")))
                 mb.addInstruction(BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, v3))
 
-                // .setMessage
                 mb.addInstruction(BuilderInstruction21c(Opcode.CONST_STRING, v0,
                     ImmutableStringReference(cfg.message)))
                 mb.addInstruction(BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 2, v3, v0, 0, 0, 0,
@@ -169,7 +162,6 @@ class DexPatcher {
                         listOf("Ljava/lang/CharSequence;"), "Landroid/app/AlertDialog\$Builder;")))
                 mb.addInstruction(BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, v3))
 
-                // .setPositiveButton
                 mb.addInstruction(BuilderInstruction21c(Opcode.CONST_STRING, v0,
                     ImmutableStringReference(cfg.buttonText)))
                 mb.addInstruction(BuilderInstruction11n(Opcode.CONST_4, v1, 0))
@@ -180,37 +172,36 @@ class DexPatcher {
                         "Landroid/app/AlertDialog\$Builder;")))
                 mb.addInstruction(BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, v3))
 
-                // .setCancelable(false)
                 mb.addInstruction(BuilderInstruction11n(Opcode.CONST_4, v0, 0))
                 mb.addInstruction(BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 2, v3, v0, 0, 0, 0,
                     ImmutableMethodReference("Landroid/app/AlertDialog\$Builder;", "setCancelable",
                         listOf("Z"), "Landroid/app/AlertDialog\$Builder;")))
                 mb.addInstruction(BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, v3))
 
-                // .show()
                 mb.addInstruction(BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 1, v3, 0, 0, 0, 0,
                     ImmutableMethodReference("Landroid/app/AlertDialog\$Builder;", "show",
                         emptyList(), "Landroid/app/AlertDialog;")))
                 mb.addInstruction(BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, v4))
 
-                // end label
-                mb.addLabel("end_zovex_${cfg.prefKey.replace('.', '_')}")
+                mb.addLabel("end_zovex_${cfg.prefKey.replace('.','_').replace('-','_')}")
 
-                // original instructions
+                // הוסף הוראות מקוריות
                 impl.instructions.forEach { ins ->
                     mb.addInstruction(ins as com.android.tools.smali.dexlib2.builder.BuilderInstruction)
                 }
 
                 injected = true
+
+                // MethodImplementationBuilder ממש את MethodImplementation — נשתמש בו ישירות
                 ImmutableMethod(
                     method.definingClass,
                     method.name,
-                    method.parameters?.map { ImmutableMethodParameter(it.type, it.annotations, it.name) },
+                    null,
                     method.returnType,
                     method.accessFlags,
-                    method.annotations?.map { ImmutableAnnotation(it.visibility, it.type, it.elements) }?.toSet(),
                     null,
-                    ImmutableMethodImplementation(mb.registerCount, mb.instructions.toList(), emptyList(), emptyList())
+                    null,
+                    mb as com.android.tools.smali.dexlib2.iface.MethodImplementation
                 )
             }
 
@@ -221,7 +212,10 @@ class DexPatcher {
             )
         }
 
-        DexFileFactory.writeDexFile(outDex.absolutePath, ImmutableDexFile(Opcodes.forApi(26), newClasses))
+        DexFileFactory.writeDexFile(
+            outDex.absolutePath,
+            ImmutableDexFile(Opcodes.forApi(26), newClasses)
+        )
         return injected
     }
 }
