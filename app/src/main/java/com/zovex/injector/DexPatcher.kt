@@ -3,7 +3,7 @@ package com.zovex.injector
 import com.android.tools.smali.dexlib2.DexFileFactory
 import com.android.tools.smali.dexlib2.Opcodes
 import com.android.tools.smali.dexlib2.Opcode
-import com.android.tools.smali.dexlib2.builder.MethodImplementationBuilder
+import com.android.tools.smali.dexlib2.builder.MutableMethodImplementation
 import com.android.tools.smali.dexlib2.builder.instruction.BuilderInstruction11n
 import com.android.tools.smali.dexlib2.builder.instruction.BuilderInstruction11x
 import com.android.tools.smali.dexlib2.builder.instruction.BuilderInstruction21c
@@ -86,10 +86,8 @@ class DexPatcher {
         val dex = DexFileFactory.loadDexFile(dexFile.absolutePath, Opcodes.forApi(26))
         var injected = false
 
-        val labelName = "zovex_end_" + cfg.prefKey
-            .replace('.', '_')
-            .replace('-', '_')
-            .replace('/', '_')
+        val labelName = "zovex_" + cfg.prefKey
+            .replace('.', '_').replace('-', '_').replace('/', '_')
 
         val newClasses = dex.classes.map { cls ->
             if (cls.type != targetClass) return@map cls
@@ -98,6 +96,9 @@ class DexPatcher {
                 if (method.name != "onCreate") return@map method
                 val impl = method.implementation ?: return@map method
 
+                // MutableMethodImplementation מקבל את ה-impl המקורי — לא צריך להמיר instructions!
+                val mmi = MutableMethodImplementation(impl)
+
                 val paramCount = 1 + (method.parameters?.size ?: 0)
                 val origRegs   = impl.registerCount
                 val newRegCount = maxOf(origRegs, paramCount + 6)
@@ -105,7 +106,14 @@ class DexPatcher {
                 val v0 = 0; val v1 = 1; val v2 = 2
                 val v3 = 3; val v4 = 4
 
-                val mb = MethodImplementationBuilder(newRegCount)
+                // הוסף registers אם צריך
+                if (newRegCount > origRegs) {
+                    // לא ניתן לשנות registerCount ישירות — נבנה impl חדש עם רכיבי הInjection
+                    // ואחר-כך נצרף את המקוריות דרך ImmutableMethodImplementation
+                }
+
+                // בנה builder עם registers חדשים
+                val mb = com.android.tools.smali.dexlib2.builder.MethodImplementationBuilder(newRegCount)
 
                 // SharedPreferences
                 mb.addInstruction(BuilderInstruction21c(Opcode.CONST_STRING, v0,
@@ -116,7 +124,6 @@ class DexPatcher {
                         listOf("Ljava/lang/String;", "I"), "Landroid/content/SharedPreferences;")))
                 mb.addInstruction(BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, v2))
 
-                // getBoolean
                 mb.addInstruction(BuilderInstruction21c(Opcode.CONST_STRING, v0,
                     ImmutableStringReference(cfg.prefKey)))
                 mb.addInstruction(BuilderInstruction11n(Opcode.CONST_4, v1, 0))
@@ -125,11 +132,9 @@ class DexPatcher {
                         listOf("Ljava/lang/String;", "Z"), "Z")))
                 mb.addInstruction(BuilderInstruction11x(Opcode.MOVE_RESULT, v0))
 
-                // if shown goto end — label מוצהר פה
                 val endLabel = mb.addLabel(labelName)
                 mb.addInstruction(BuilderInstruction21t(Opcode.IF_NEZ, v0, endLabel))
 
-                // putBoolean(true)
                 mb.addInstruction(BuilderInstruction35c(Opcode.INVOKE_INTERFACE, 1, v2, 0, 0, 0, 0,
                     ImmutableMethodReference("Landroid/content/SharedPreferences;", "edit",
                         emptyList(), "Landroid/content/SharedPreferences\$Editor;")))
@@ -146,7 +151,6 @@ class DexPatcher {
                     ImmutableMethodReference("Landroid/content/SharedPreferences\$Editor;", "apply",
                         emptyList(), "V")))
 
-                // new AlertDialog.Builder
                 mb.addInstruction(BuilderInstruction21c(Opcode.NEW_INSTANCE, v3,
                     ImmutableTypeReference("Landroid/app/AlertDialog\$Builder;")))
                 mb.addInstruction(BuilderInstruction35c(Opcode.INVOKE_DIRECT, 2, v3, p0, 0, 0, 0,
@@ -188,17 +192,29 @@ class DexPatcher {
                         emptyList(), "Landroid/app/AlertDialog;")))
                 mb.addInstruction(BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, v4))
 
-                // הוראות מקוריות — ה-label כבר הוצהר למעלה, לא מוסיפים שוב!
-                impl.instructions.forEach { ins ->
-                    mb.addInstruction(ins as com.android.tools.smali.dexlib2.builder.BuilderInstruction)
-                }
+                // הוסף הוראות מקוריות כ-ImmutableInstructions (לא DexBacked)
+                impl.instructions.toList().let { origInstructions ->
+                    val immutableImpl = ImmutableMethodImplementation(
+                        newRegCount, origInstructions, impl.tryBlocks, impl.debugItems
+                    )
+                    // בנה impl סופי = injected code + original code
+                    val injectedInstructions = mutableListOf<com.android.tools.smali.dexlib2.iface.instruction.Instruction>()
+                    // קח את ה-instructions שבנינו מ-mb דרך MutableMethodImplementation
+                    val mbMmi = MutableMethodImplementation(mb as com.android.tools.smali.dexlib2.iface.MethodImplementation)
+                    mbMmi.instructions.forEach { injectedInstructions.add(it) }
+                    // הוסף את המקוריות
+                    origInstructions.forEach { injectedInstructions.add(it) }
 
-                injected = true
-                ImmutableMethod(
-                    method.definingClass, method.name, null,
-                    method.returnType, method.accessFlags, null, null,
-                    mb as com.android.tools.smali.dexlib2.iface.MethodImplementation
-                )
+                    injected = true
+                    ImmutableMethod(
+                        method.definingClass, method.name, null,
+                        method.returnType, method.accessFlags, null, null,
+                        ImmutableMethodImplementation(
+                            newRegCount, injectedInstructions,
+                            impl.tryBlocks, impl.debugItems
+                        )
+                    )
+                }
             }
 
             ImmutableClassDef(
