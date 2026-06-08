@@ -1,3 +1,0 @@
--keep class com.zovex.** { *; }
--dontwarn org.bouncycastle.**
--dontwarn com.zovex.bc.**
