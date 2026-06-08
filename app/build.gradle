@@ -1,0 +1,64 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.zovex.injector'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId "com.zovex.injector"
+        minSdk 26
+        targetSdk 36
+        versionCode 1
+        versionName "1.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions { jvmTarget = '17' }
+    buildFeatures { viewBinding true }
+    packagingOptions {
+        resources {
+            excludes += [
+                'META-INF/**',
+                'META-INF/DEPENDENCIES',
+                'META-INF/LICENSE',
+                'META-INF/NOTICE',
+                'META-INF/license.txt',
+                'META-INF/notice.txt',
+                'META-INF/ASL2.0',
+                '**/*.kotlin_module',
+                'lib/x86/**',
+                'lib/x86_64/**',
+                'lib/arm64-v8a/**',
+                'lib/armeabi-v7a/**'
+            ]
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.16.0'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'com.google.android.material:material:1.12.0'
+    implementation 'androidx.constraintlayout:constraintlayout:2.2.1'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
+    // apktool — פירוק, הזרקת smali, בנייה מחדש
+    implementation('org.apktool:apktool-lib:2.12.1') {
+        exclude group: 'com.google.guava', module: 'guava'
+        exclude group: 'org.slf4j'
+        exclude group: 'ch.qos.logback'
+    }
+    implementation 'com.zovex:signer:3.0.1'
+}
