@@ -2,10 +2,6 @@ package com.zovex.injector
 
 import android.content.Context
 import android.util.Log
-import brut.androlib.ApkDecoder
-import brut.androlib.Config
-import brut.androlib.res.Framework
-import brut.apktool.Main
 import java.io.File
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
@@ -33,9 +29,7 @@ class InjectionEngine(private val context: Context) {
         val inputApk = File(inputApkPath)
         val workDir = workDir()
         log("פורק APK...")
-
-        // פרק עם apktool
-        decodeApk(inputApk, workDir)
+        unpack(inputApk, workDir)
 
         log("מחפש דיאלוגים בsmali...")
         var count = 0
@@ -50,14 +44,14 @@ class InjectionEngine(private val context: Context) {
             }
         log("בוטלו $count דיאלוגים")
 
-        log("בונה APK...")
-        val unsigned = outputApk("no_dialogs_unsigned")
-        buildApk(workDir, unsigned)
+        val out = outputApk("no_dialogs_unsigned")
+        log("אורז APK...")
+        repack(workDir, out)
 
         log("חותם APK...")
         val signed = outputApk("no_dialogs_${System.currentTimeMillis()}")
-        ApkSigner(context).sign(unsigned, signed)
-        unsigned.delete()
+        ApkSigner(context).sign(out, signed)
+        out.delete()
         workDir.deleteRecursively()
         log("הושלם: ${signed.length() / 1024} KB")
         return signed
@@ -67,72 +61,49 @@ class InjectionEngine(private val context: Context) {
         val inputApk = File(inputApkPath)
         val workDir = workDir()
         log("פורק APK...")
+        unpack(inputApk, workDir)
 
-        decodeApk(inputApk, workDir)
-
-        // מצא Activity
-        val target = activityClass ?: findMainActivitySmali(workDir)
+        val target = activityClass ?: findMainActivity(workDir, inputApk)
         if (target == null) {
             workDir.deleteRecursively()
-            throw Exception("לא נמצא Activity")
+            throw Exception("לא נמצא Activity מתאים")
         }
         log("Activity: $target")
 
-        // הזרק smali
-        val injected = injectDialogSmali(workDir, target, cfg)
+        val injected = injectDialogIntoSmali(workDir, target, cfg)
         if (!injected) {
             workDir.deleteRecursively()
             throw Exception("לא הצליח להזריק ל-$target")
         }
 
-        log("בונה APK...")
-        val unsigned = outputApk("injected_unsigned")
-        buildApk(workDir, unsigned)
+        val out = outputApk("injected_unsigned")
+        log("אורז APK...")
+        repack(workDir, out)
 
         log("חותם APK...")
         val signed = outputApk("injected_${System.currentTimeMillis()}")
-        ApkSigner(context).sign(unsigned, signed)
-        unsigned.delete()
+        ApkSigner(context).sign(out, signed)
+        out.delete()
         workDir.deleteRecursively()
         log("הושלם: ${signed.length() / 1024} KB")
         return signed
     }
 
-    private fun decodeApk(apk: File, outDir: File) {
-        // apktool decode
-        val args = arrayOf("d", "-f", "-o", outDir.absolutePath, apk.absolutePath)
-        Main.main(args)
-    }
-
-    private fun buildApk(dir: File, out: File) {
-        // apktool build
-        val args = arrayOf("b", "-o", out.absolutePath, dir.absolutePath)
-        Main.main(args)
-    }
-
-    private fun findMainActivitySmali(workDir: File): String? {
-        // קרא AndroidManifest.xml שפוצח ע"י apktool
-        val manifest = File(workDir, "AndroidManifest.xml")
-        if (manifest.exists()) {
-            val text = manifest.readText()
-            // חפש action.MAIN
-            val regex = Regex("""android:name="([^"]+)"""")
-            val matches = regex.findAll(text).map { it.groupValues[1] }.toList()
-            // חפש activity שיש לו MAIN intent
-            val mainIdx = text.indexOf("android.intent.action.MAIN")
-            if (mainIdx > 0) {
-                // חזור אחורה למצוא שם activity
-                val before = text.substring(0, mainIdx)
-                val actIdx = before.lastIndexOf("android:name=")
-                if (actIdx >= 0) {
-                    val nameMatch = Regex("""android:name="([^"]+)"""")
-                        .findAll(before.substring(actIdx)).firstOrNull()
-                    if (nameMatch != null) {
-                        return nameMatch.groupValues[1]
-                    }
-                }
+    private fun findMainActivity(workDir: File, apk: File): String? {
+        // קרא manifest בינארי ישירות מה-APK
+        try {
+            ZipFile(apk).use { zip ->
+                val entry = zip.getEntry("AndroidManifest.xml") ?: return@use
+                val bytes = zip.getInputStream(entry).readBytes()
+                val text = parseAxml(bytes)
+                val regex = Regex("""android\.intent\.action\.MAIN[\s\S]{0,500}?android:name="([^"]+)"""")
+                val m = regex.find(text)
+                if (m != null) return m.groupValues[1].replace('.', '/')
+                // fallback: חפש כל activity עם name
+                val allActivities = Regex("""<activity[^>]*android:name="([^"]+)"""").findAll(text)
+                return allActivities.firstOrNull()?.groupValues?.get(1)?.replace('.', '/')
             }
-        }
+        } catch (e: Exception) { /* ignore */ }
 
         // Fallback: חפש smali עם onCreate
         workDir.walkTopDown()
@@ -140,104 +111,167 @@ class InjectionEngine(private val context: Context) {
             .forEach { smali ->
                 val text = smali.readText()
                 if (text.contains("method public onCreate(Landroid/os/Bundle;)V") &&
-                    text.contains("super->onCreate")) {
-                    return smali.relativeTo(File(workDir, "smali"))
-                        .path.replace(File.separatorChar, '/')
-                        .removeSuffix(".smali")
+                    text.contains("invoke-super")) {
+                    // החזר class path יחסי
+                    val smaliDirs = workDir.listFiles { f -> f.isDirectory && f.name.startsWith("smali") }
+                    smaliDirs?.forEach { dir ->
+                        if (smali.absolutePath.startsWith(dir.absolutePath)) {
+                            return smali.relativeTo(dir).path
+                                .removeSuffix(".smali")
+                                .replace(File.separatorChar, '/')
+                        }
+                    }
                 }
             }
         return null
     }
 
-    private fun injectDialogSmali(workDir: File, activityName: String, cfg: DialogConfig): Boolean {
-        // מצא את קובץ ה-smali של ה-Activity
-        val smaliDirs = workDir.listFiles { f -> f.isDirectory && f.name.startsWith("smali") } ?: return false
+    private fun parseAxml(data: ByteArray): String {
+        // פרסור בסיסי של AXML בינארי — מחפש strings
+        val sb = StringBuilder()
+        try {
+            val buf = java.nio.ByteBuffer.wrap(data).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+            var i = 0
+            while (i < data.size - 4) {
+                val b = data[i].toInt() and 0xFF
+                // חפש UTF-16 strings
+                if (b in 0x20..0x7E) {
+                    val c = b.toChar()
+                    if (c.isLetterOrDigit() || c == '.' || c == '/' || c == '_' || c == ':') {
+                        sb.append(c)
+                    } else {
+                        if (sb.length > 3) sb.append(' ')
+                        else sb.clear()
+                    }
+                }
+                i++
+            }
+        } catch (e: Exception) { }
+        return sb.toString()
+    }
+
+    private fun injectDialogIntoSmali(workDir: File, activityClass: String, cfg: DialogConfig): Boolean {
+        val smaliDirs = workDir.listFiles { f -> f.isDirectory && f.name.startsWith("smali") }
+            ?: return false
 
         var smaliFile: File? = null
         for (dir in smaliDirs) {
-            val candidate = File(dir, "$activityName.smali")
-            if (candidate.exists()) { smaliFile = candidate; break }
-            // נסה גם עם package prefix
-            val byName = dir.walkTopDown().find { it.nameWithoutExtension == activityName.substringAfterLast('/') }
-            if (byName != null) { smaliFile = byName; break }
+            val f = File(dir, "$activityClass.smali")
+            if (f.exists()) { smaliFile = f; break }
         }
 
         if (smaliFile == null) {
-            log("לא נמצא $activityName.smali")
+            // נסה למצוא לפי שם בלבד
+            val name = activityClass.substringAfterLast('/')
+            for (dir in smaliDirs) {
+                val found = dir.walkTopDown().find { it.nameWithoutExtension == name }
+                if (found != null) { smaliFile = found; break }
+            }
+        }
+
+        if (smaliFile == null) {
+            log("לא נמצא smali עבור $activityClass")
             return false
         }
 
-        val text = smaliFile.readText()
-        val onCreateStart = text.indexOf(".method public onCreate(Landroid/os/Bundle;)V")
-        if (onCreateStart < 0) {
-            log("לא נמצא onCreate ב-${smaliFile.name}")
+        var text = smaliFile.readText()
+
+        // מצא onCreate
+        val onCreateIdx = text.indexOf(".method public onCreate(Landroid/os/Bundle;)V")
+        if (onCreateIdx < 0) {
+            log("לא נמצא onCreate")
             return false
         }
 
-        // מצא את שורת super.onCreate()
-        val superCall = "invoke-super {p0, p1}, Landroid/app/Activity;->onCreate(Landroid/os/Bundle;)V"
-        val superIdx = text.indexOf(superCall, onCreateStart)
-        if (superIdx < 0) {
-            log("לא נמצא super.onCreate")
-            return false
+        // מצא super.onCreate — הזרק אחריו
+        val superPatterns = listOf(
+            "invoke-super {p0, p1}, Landroid/app/Activity;->onCreate(Landroid/os/Bundle;)V",
+            "invoke-super {p0, p1}, Landroid/app/AppCompatActivity;->onCreate(Landroid/os/Bundle;)V",
+            "invoke-super {p0, p1}, Landroidx/appcompat/app/AppCompatActivity;->onCreate(Landroid/os/Bundle;)V",
+            "invoke-super {p0, p1}, Landroid/support/v7/app/AppCompatActivity;->onCreate(Landroid/os/Bundle;)V"
+        )
+
+        var insertAt = -1
+        var matchedSuper = ""
+        for (pattern in superPatterns) {
+            val idx = text.indexOf(pattern, onCreateIdx)
+            if (idx >= 0) {
+                insertAt = idx + pattern.length
+                matchedSuper = pattern
+                break
+            }
         }
 
-        val insertAfter = superIdx + superCall.length
+        if (insertAt < 0) {
+            // נסה regex
+            val superRegex = Regex("""invoke-super \{p0, p1\},.+?->onCreate\(Landroid/os/Bundle;\)V""")
+            val m = superRegex.find(text, onCreateIdx)
+            if (m != null) {
+                insertAt = m.range.last + 1
+            } else {
+                log("לא נמצא super.onCreate")
+                return false
+            }
+        }
 
-        // בנה smali code לדיאלוג
-        val dialogSmali = buildDialogSmali(cfg)
+        // עדכן .locals
+        val localsRegex = Regex("""\.locals (\d+)""")
+        val onCreateSection = text.substring(onCreateIdx, minOf(onCreateIdx + 500, text.length))
+        val localsMatch = localsRegex.find(onCreateSection)
+        if (localsMatch != null) {
+            val current = localsMatch.groupValues[1].toIntOrNull() ?: 0
+            if (current < 5) {
+                text = text.replaceFirst(".locals $current", ".locals 5")
+            }
+        }
 
-        val newText = text.substring(0, insertAfter) + "\n" + dialogSmali + text.substring(insertAfter)
+        // בנה smali code
+        val dialogCode = buildDialogSmali(cfg)
 
-        // עדכן מספר registers אם צריך
-        val finalText = ensureEnoughRegisters(newText, onCreateStart)
-        smaliFile.writeText(finalText)
+        // הזרק
+        text = text.substring(0, insertAt) + "\n" + dialogCode + text.substring(insertAt)
+        smaliFile.writeText(text)
         log("הוזרק ל-${smaliFile.name}")
         return true
     }
 
     private fun buildDialogSmali(cfg: DialogConfig): String {
-        // smali code להצגת AlertDialog עם SharedPreferences check
-        val prefKey = cfg.prefKey.replace("'", "\\'")
-        val title = cfg.title.replace("'", "\\'")
-        val message = cfg.message.replace("'", "\\'")
-        val buttonText = cfg.buttonText.replace("'", "\\'")
-
+        val key = cfg.prefKey
+        val labelSuffix = key.replace(Regex("[^a-zA-Z0-9_]"), "_")
         return """
-    # === ZovexInjector Dialog ===
+
+    # ZovexInjector start
     const-string v0, "zovex_sp"
     const/4 v1, 0x0
     invoke-virtual {p0, v0, v1}, Landroid/content/Context;->getSharedPreferences(Ljava/lang/String;I)Landroid/content/SharedPreferences;
     move-result-object v2
 
-    const-string v0, "$prefKey"
+    const-string v0, "$key"
     invoke-interface {v2, v0, v1}, Landroid/content/SharedPreferences;->getBoolean(Ljava/lang/String;Z)Z
     move-result v0
 
-    if-nez v0, :zovex_skip_$prefKey
+    if-nez v0, :zovex_skip_$labelSuffix
 
     invoke-interface {v2}, Landroid/content/SharedPreferences;->edit()Landroid/content/SharedPreferences${'$'}Editor;
     move-result-object v3
-
-    const-string v0, "$prefKey"
+    const-string v0, "$key"
     const/4 v1, 0x1
     invoke-interface {v3, v0, v1}, Landroid/content/SharedPreferences${'$'}Editor;->putBoolean(Ljava/lang/String;Z)Landroid/content/SharedPreferences${'$'}Editor;
     move-result-object v3
-
     invoke-interface {v3}, Landroid/content/SharedPreferences${'$'}Editor;->apply()V
 
     new-instance v3, Landroid/app/AlertDialog${'$'}Builder;
     invoke-direct {v3, p0}, Landroid/app/AlertDialog${'$'}Builder;-><init>(Landroid/content/Context;)V
 
-    const-string v0, "$title"
+    const-string v0, "${cfg.title}"
     invoke-virtual {v3, v0}, Landroid/app/AlertDialog${'$'}Builder;->setTitle(Ljava/lang/CharSequence;)Landroid/app/AlertDialog${'$'}Builder;
     move-result-object v3
 
-    const-string v0, "$message"
+    const-string v0, "${cfg.message}"
     invoke-virtual {v3, v0}, Landroid/app/AlertDialog${'$'}Builder;->setMessage(Ljava/lang/CharSequence;)Landroid/app/AlertDialog${'$'}Builder;
     move-result-object v3
 
-    const-string v0, "$buttonText"
+    const-string v0, "${cfg.buttonText}"
     const/4 v1, 0x0
     invoke-virtual {v3, v0, v1}, Landroid/app/AlertDialog${'$'}Builder;->setPositiveButton(Ljava/lang/CharSequence;Landroid/content/DialogInterface${'$'}OnClickListener;)Landroid/app/AlertDialog${'$'}Builder;
     move-result-object v3
@@ -248,37 +282,54 @@ class InjectionEngine(private val context: Context) {
 
     invoke-virtual {v3}, Landroid/app/AlertDialog${'$'}Builder;->show()Landroid/app/AlertDialog;
 
-    :zovex_skip_$prefKey
-    # === End ZovexInjector ===
+    :zovex_skip_$labelSuffix
+    # ZovexInjector end
 """
-    }
-
-    private fun ensureEnoughRegisters(text: String, onCreateStart: Int): String {
-        // וודא שיש לפחות 5 registers (v0-v4)
-        val localsRegex = Regex("""\.locals (\d+)""")
-        val methodSection = text.substring(onCreateStart)
-        val match = localsRegex.find(methodSection) ?: return text
-        val current = match.groupValues[1].toIntOrNull() ?: return text
-        if (current >= 5) return text
-        return text.replaceFirst(".locals $current", ".locals 5")
     }
 
     private fun deleteDialogsFromSmali(smaliFile: File): Int {
         val lines = smaliFile.readLines().toMutableList()
         var count = 0
-        var i = 0
-        while (i < lines.size) {
-            val line = lines[i].trim()
-            // חפש invoke-virtual על AlertDialog.Builder.show()
+        val toRemove = mutableListOf<Int>()
+        lines.forEachIndexed { i, line ->
             if (line.contains("Landroid/app/AlertDialog\$Builder;->show()Landroid/app/AlertDialog;")) {
-                lines.removeAt(i)
+                toRemove.add(i)
                 count++
-                continue
             }
-            i++
         }
-        if (count > 0) smaliFile.writeText(lines.joinToString("\n"))
+        if (toRemove.isNotEmpty()) {
+            toRemove.reversed().forEach { lines.removeAt(it) }
+            smaliFile.writeText(lines.joinToString("\n"))
+        }
         return count
+    }
+
+    private fun unpack(apk: File, dir: File) {
+        ZipFile(apk).use { zip ->
+            zip.entries().asSequence().forEach { entry ->
+                val outFile = File(dir, entry.name)
+                if (!outFile.canonicalPath.startsWith(dir.canonicalPath)) return@forEach
+                if (entry.isDirectory) { outFile.mkdirs(); return@forEach }
+                outFile.parentFile?.mkdirs()
+                zip.getInputStream(entry).use { input ->
+                    outFile.outputStream().use { input.copyTo(it) }
+                }
+            }
+        }
+    }
+
+    private fun repack(apkDir: File, out: File) {
+        ZipOutputStream(out.outputStream().buffered()).use { zos ->
+            zos.setLevel(0)
+            apkDir.walkTopDown().filter { it.isFile }.forEach { file ->
+                val rel = file.relativeTo(apkDir).path.replace(File.separatorChar, '/')
+                if (rel.startsWith("META-INF/")) return@forEach
+                zos.putNextEntry(ZipEntry(rel))
+                file.inputStream().use { it.copyTo(zos) }
+                zos.closeEntry()
+            }
+        }
+        log("repacked: ${out.length() / 1024} KB")
     }
 
     private fun workDir() =
